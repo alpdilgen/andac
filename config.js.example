@@ -1,0 +1,19 @@
+/* ============================================================
+   config.js.example — Firebase yapılandırma şablonu
+
+   1. Bu dosyayı KOPYALAYIP "config.js" adıyla kaydet
+      (config.js .gitignore'da olduğu için repo'ya gitmez).
+   2. Firebase Console → Project Settings → General → "Your apps"
+      bölümündeki firebaseConfig değerlerini aşağıya yapıştır.
+   3. README.md içindeki "Firebase Kurulumu" adımlarını takip et.
+   ============================================================ */
+
+const firebaseConfig = {
+  apiKey: "BURAYA_API_KEY",
+  authDomain: "BURAYA_PROJE.firebaseapp.com",
+  databaseURL: "https://BURAYA_PROJE-default-rtdb.firebaseio.com",
+  projectId: "BURAYA_PROJE",
+  storageBucket: "BURAYA_PROJE.appspot.com",
+  messagingSenderId: "BURAYA_SENDER_ID",
+  appId: "BURAYA_APP_ID",
+};

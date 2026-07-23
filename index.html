@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>⚽ Fena Ekip - Dünya Kupası Sticker Takip</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="pitch-bg"></div>
+
+  <header class="site-header" id="site-header">
+    <h1>⚽ Fena Ekip - Dünya Kupası Sticker Takip</h1>
+  </header>
+
+  <div class="search-bar-wrap">
+    <div class="search-bar">
+      <input type="text" id="search-input" placeholder="Sticker kodu ara… (örn. MEX7)" autocomplete="off">
+      <button id="search-btn">Ara</button>
+    </div>
+  </div>
+
+  <div id="breadcrumb-wrap"></div>
+  <div id="mini-navbar-wrap"></div>
+
+  <main class="container" id="app"></main>
+
+  <div id="modal-root"></div>
+  <div id="toast-root"></div>
+
+  <!-- Firebase (compat SDK — build adımı gerektirmez) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+
+  <!-- Uygulama -->
+  <script src="config.js"></script>
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
