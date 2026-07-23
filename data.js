@@ -4,11 +4,11 @@
    ============================================================ */
 
 // 6 koleksiyoncu (sabit, genişletilebilirlik gerekmiyor)
-const COLLECTORS = ["Efe", "Cenk", "Andaç", "Andaç D.", "Berker", "Arda"];
+const COLLECTORS = ["Efe", "Cenk", "Andaç", "Andaç D", "Berker", "Arda"];
 
 // Ana sayfada sol/sağ hizalama
 const COLLECTORS_LEFT = ["Efe", "Cenk", "Andaç"];
-const COLLECTORS_RIGHT = ["Andaç D.", "Berker", "Arda"];
+const COLLECTORS_RIGHT = ["Andaç D", "Berker", "Arda"];
 
 // 12 grup x 4 ülke = 48 ülke, [Ülke adı, Kod]
 const GROUPS = {
