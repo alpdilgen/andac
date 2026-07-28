@@ -16,6 +16,7 @@ const undoStacks = {}; // collector -> [{code, prevStatus, prevSwap}]
 let firstRenderDone = false;
 let modalState = null; // { collector, code, draftStatus, draftSwap } — aktif modal (varsa)
 let swapFinderTarget = null; // Swap Finder sekmesinde seçili karşılaştırma kişisi
+const tradeStates = {}; // collector -> { stage: 'intro'|'building'|'summary', selectedSwap:Set, selectedMissing:Set }
 
 
 db.ref("/stickers").on("value", (snap) => {
@@ -153,7 +154,8 @@ function parseHash() {
     if (countryCode) return { view: "country", collector, group: g, countryCode, highlight: params.get("h") };
     return { view: "group", collector, group: g };
   }
-  if (["groups", "fwc", "missing", "swap"].includes(second)) {
+  if (second === "swap-stickers") return { view: "swapstickers", collector, highlight: params.get("h") };
+  if (["groups", "fwc", "missing", "swap", "trade"].includes(second)) {
     return { view: second, collector, highlight: params.get("h") };
   }
   return { view: "groups", collector };
@@ -307,9 +309,11 @@ function render() {
     case "panel-entry": renderPanelEntry(route); break;
     case "color-edit": app.innerHTML = renderColorScreen(route.collector, true); attachColorEvents(route.collector, true); break;
     case "groups": app.innerHTML = renderGroups(route); attachGroupsEvents(route); break;
-    case "fwc": app.innerHTML = renderFwc(route); attachCardEvents(route.collector); scrollToHighlight(route.highlight); break;
-    case "missing": app.innerHTML = renderMissing(route); attachCardEvents(route.collector); break;
+    case "fwc": app.innerHTML = renderFwc(route); attachPanelHeaderEvents(route.collector); attachCardEvents(route.collector); scrollToHighlight(route.highlight); break;
+    case "missing": app.innerHTML = renderMissing(route); attachPanelHeaderEvents(route.collector); attachCardEvents(route.collector); break;
+    case "swapstickers": app.innerHTML = renderSwapStickers(route); attachPanelHeaderEvents(route.collector); attachCardEvents(route.collector); break;
     case "swap": app.innerHTML = renderSwapFinder(route); attachSwapFinderEvents(route); break;
+    case "trade": app.innerHTML = renderTradeMaker(route); attachTradeMakerEvents(route); break;
     case "group": app.innerHTML = renderGroupCountries(route); attachGroupCountriesEvents(route); break;
     case "country": app.innerHTML = renderCountryCards(route); attachCountryCardsEvents(route); scrollToHighlight(route.highlight); break;
     default: app.innerHTML = renderHome(); attachHomeEvents();
@@ -356,11 +360,14 @@ function renderMiniNavbar(route) {
   if (!route.collector || route.view === "panel-entry" || route.view === "color-edit") { wrap.innerHTML = ""; return; }
   const tabs = [
     { key: "groups", label: "Gruplar" },
-    { key: "fwc", label: "FWC" },
     { key: "missing", label: "Missing Stickers" },
+    { key: "swap-stickers", label: "Swap Stickers" },
     { key: "swap", label: "Swap Finder" },
+    { key: "trade", label: "Trade Maker" },
   ];
-  const activeKey = (route.view === "group" || route.view === "country") ? "groups" : route.view;
+  let activeKey = route.view;
+  if (route.view === "group" || route.view === "country" || route.view === "fwc") activeKey = "groups";
+  if (route.view === "swapstickers") activeKey = "swap-stickers";
   wrap.innerHTML = `<div class="mini-navbar">${tabs.map((t) =>
     `<button class="${t.key === activeKey ? "active" : ""}" data-tab="${t.key}">${t.label}</button>`
   ).join("")}</div>`;
@@ -523,18 +530,30 @@ function renderGroups(route) {
     const stats = codesCompletion(GROUP_CODES[g], collector);
     const isComplete = stats.missing === 0;
     if (isComplete) completeGroups++;
+    const countryNames = countriesInGroup(g).map((c) => c.name).join(", ");
     return `<div class="group-box ${isComplete ? "complete" : ""}" style="background:${groupTone(idx)}" data-group="${g}">
       ${isComplete ? '<div class="gol-badge">⚽ GOL!</div>' : ""}
       <div class="g-name">${g} Grubu</div>
+      <div class="g-countries">${esc(countryNames)}</div>
       <div class="g-bar-track"><div class="g-bar-fill" style="width:${stats.pct}%"></div></div>
       <div class="g-pct">${pctLabel(stats.pct)}</div>
     </div>`;
   }).join("");
 
+  const fwcStats = codesCompletion(FWC_CODE_LIST, collector);
+  const fwcComplete = fwcStats.missing === 0;
+  const fwcBox = `<div class="group-box fwc-tile ${fwcComplete ? "complete" : ""}" style="background:${groupTone(12)}" data-fwc="1">
+      ${fwcComplete ? '<div class="gol-badge">⚽ GOL!</div>' : ""}
+      <div class="g-name">⚽ FWC</div>
+      <div class="g-countries">Özel Dünya Kupası kartları</div>
+      <div class="g-bar-track"><div class="g-bar-fill" style="width:${fwcStats.pct}%"></div></div>
+      <div class="g-pct">${pctLabel(fwcStats.pct)}</div>
+    </div>`;
+
   return `
     ${panelHeaderHtml(collector, collector)}
     <div class="groups-summary">12 gruptan ${completeGroups}'ü tamamlandı</div>
-    <div class="groups-grid">${boxes}</div>
+    <div class="groups-grid">${boxes}${fwcBox}</div>
   `;
 }
 
@@ -543,6 +562,8 @@ function attachGroupsEvents(route) {
   document.querySelectorAll("[data-group]").forEach((el) => {
     el.addEventListener("click", () => go(`${collectorHash(route.collector)}/grup/${el.dataset.group}`));
   });
+  const fwcTile = document.querySelector("[data-fwc]");
+  if (fwcTile) fwcTile.addEventListener("click", () => go(`${collectorHash(route.collector)}/fwc`));
 }
 
 // ---------- FWC sekmesi ----------
@@ -570,8 +591,15 @@ function renderGroupCountries(route) {
       <div class="c-pct">${pctLabel(stats.pct)}</div>
     </div>`;
   }).join("");
+  const prevG = prevGroupKey(group);
+  const nextG = nextGroupKey(group);
   return `
     ${panelHeaderHtml(collector, `${group} Grubu`)}
+    <div class="country-nav">
+      <button class="nav-arrow" id="prev-group" title="${esc(prevG)} Grubu">‹</button>
+      <div class="country-title">${esc(group)} Grubu</div>
+      <button class="nav-arrow" id="next-group" title="${esc(nextG)} Grubu">›</button>
+    </div>
     <div class="countries-grid">${boxes}</div>
   `;
 }
@@ -580,6 +608,10 @@ function attachGroupCountriesEvents(route) {
   document.querySelectorAll("[data-country]").forEach((el) => {
     el.addEventListener("click", () => go(`${collectorHash(route.collector)}/grup/${route.group}/${el.dataset.country}`));
   });
+  const prevG = prevGroupKey(route.group);
+  const nextG = nextGroupKey(route.group);
+  document.getElementById("prev-group").addEventListener("click", () => go(`${collectorHash(route.collector)}/grup/${prevG}`));
+  document.getElementById("next-group").addEventListener("click", () => go(`${collectorHash(route.collector)}/grup/${nextG}`));
 }
 
 // ---------- Ülke kartları (20 sticker) ----------
@@ -613,35 +645,45 @@ function attachCountryCardsEvents(route) {
   if (next) document.getElementById("next-country").addEventListener("click", () => go(`${collectorHash(route.collector)}/grup/${route.group}/${next}`));
 }
 
-// ---------- Missing Stickers sekmesi ----------
-function renderMissing(route) {
-  const { collector } = route;
-  let anyMissing = false;
+// ---------- Ortak: durum bazlı ülke blokları (Missing / Swap Stickers / Trade Maker ortak kullanır) ----------
+function collectStatusBlocks(collector, status) {
   const blocks = [];
   for (const g of GROUP_ORDER) {
     for (const [name, code] of GROUPS[g]) {
-      const codes = COUNTRY_CODES[code];
-      const missingCodes = codes.filter((c) => getStatus(collector, c) === "missing");
-      if (missingCodes.length) {
-        anyMissing = true;
-        blocks.push(`<div class="missing-country-block">
-          <div class="mc-title">${countryFlag(name)} ${esc(name)} — ${missingCodes.length} eksik</div>
-          <div class="cards-grid">${missingCodes.map((c) => stickerCardHtml(collector, c)).join("")}</div>
-        </div>`);
-      }
+      const codes = COUNTRY_CODES[code].filter((c) => getStatus(collector, c) === status);
+      if (codes.length) blocks.push({ title: `${countryFlag(name)} ${name}`, codes });
     }
   }
-  const fwcMissing = FWC_CODE_LIST.filter((c) => getStatus(collector, c) === "missing");
-  if (fwcMissing.length) {
-    anyMissing = true;
-    blocks.push(`<div class="missing-country-block">
-      <div class="mc-title">⚽ FWC — ${fwcMissing.length} eksik</div>
-      <div class="cards-grid">${fwcMissing.map((c) => stickerCardHtml(collector, c)).join("")}</div>
-    </div>`);
-  }
+  const fwcCodes = FWC_CODE_LIST.filter((c) => getStatus(collector, c) === status);
+  if (fwcCodes.length) blocks.push({ title: "⚽ FWC", codes: fwcCodes });
+  return blocks;
+}
+
+// ---------- Missing Stickers sekmesi ----------
+function renderMissing(route) {
+  const { collector } = route;
+  const blocks = collectStatusBlocks(collector, "missing");
+  const html = blocks.map((b) => `<div class="missing-country-block">
+      <div class="mc-title">${esc(b.title)} — ${b.codes.length} eksik</div>
+      <div class="cards-grid">${b.codes.map((c) => stickerCardHtml(collector, c)).join("")}</div>
+    </div>`).join("");
   return `
     ${panelHeaderHtml(collector, collector)}
-    ${anyMissing ? blocks.join("") : `<div class="missing-empty-all">🎉 Hiç eksik sticker yok, albüm tam!</div>`}
+    ${blocks.length ? html : `<div class="missing-empty-all">🎉 Hiç eksik sticker yok, albüm tam!</div>`}
+  `;
+}
+
+// ---------- Swap Stickers sekmesi (kendi swap'a açık kartların, ülkelere göre) ----------
+function renderSwapStickers(route) {
+  const { collector, highlight } = route;
+  const blocks = collectStatusBlocks(collector, "swap");
+  const html = blocks.map((b) => `<div class="missing-country-block">
+      <div class="mc-title">${esc(b.title)} — ${b.codes.length} swap'ta</div>
+      <div class="cards-grid">${b.codes.map((c) => stickerCardHtml(collector, c, { highlight })).join("")}</div>
+    </div>`).join("");
+  return `
+    ${panelHeaderHtml(collector, collector)}
+    ${blocks.length ? html : `<div class="missing-empty-all">Şu an swap'ta işaretlenmiş bir kartın yok.</div>`}
   `;
 }
 
@@ -704,6 +746,117 @@ function attachSwapFinderEvents(route) {
   });
   document.querySelectorAll(".swap-opp-row [data-code]").forEach((b) => {
     b.addEventListener("click", () => openCardModal(route.collector, b.dataset.code));
+  });
+}
+
+// ---------- Trade Maker sekmesi ----------
+function getTradeState(collector) {
+  if (!tradeStates[collector]) {
+    tradeStates[collector] = { stage: "intro", selectedSwap: new Set(), selectedMissing: new Set() };
+  }
+  return tradeStates[collector];
+}
+function resetTradeState(collector) {
+  tradeStates[collector] = { stage: "intro", selectedSwap: new Set(), selectedMissing: new Set() };
+}
+function toggleInSet(set, code) {
+  if (set.has(code)) set.delete(code); else set.add(code);
+}
+
+// Trade Maker'daki kartlar: tek tıkla direkt sepete ekler/çıkarır, modal AÇMAZ.
+function cartCardHtml(code, selected) {
+  const meta = STICKER_INDEX[code];
+  const icon = meta.group === "FWC" ? "⚽" : meta.flag;
+  return `<div class="sticker-card cart-card ${selected ? "cart-selected" : ""}" data-code="${esc(code)}">
+    <div>${icon}</div>
+    <div>${esc(code)}</div>
+    ${selected ? '<div class="cart-check">✓ Sepette</div>' : ""}
+  </div>`;
+}
+
+function renderCartBlocks(blocks, selectedSet, emptyMsg) {
+  if (!blocks.length) return `<div class="swap-empty-msg">${esc(emptyMsg)}</div>`;
+  return blocks.map((b) => `<div class="missing-country-block">
+      <div class="mc-title">${esc(b.title)}</div>
+      <div class="cards-grid">${b.codes.map((c) => cartCardHtml(c, selectedSet.has(c))).join("")}</div>
+    </div>`).join("");
+}
+
+function renderTradeMaker(route) {
+  const { collector } = route;
+  const state = getTradeState(collector);
+
+  if (state.stage === "intro") {
+    return `
+      ${panelHeaderHtml(collector, collector)}
+      <div class="trade-intro">
+        <div class="welcome-text">Bir arkadaşınla takas yapmadan önce burada teklifini hazırla:<br>vereceğin swap kartlarını ve almak istediğin eksik kartları seç.</div>
+        <button class="btn-primary" id="trade-start">+ Create a Trade</button>
+      </div>
+    `;
+  }
+
+  if (state.stage === "building") {
+    const swapBlocks = collectStatusBlocks(collector, "swap");
+    const missingBlocks = collectStatusBlocks(collector, "missing");
+    const total = state.selectedSwap.size + state.selectedMissing.size;
+    return `
+      ${panelHeaderHtml(collector, collector)}
+      <div class="trade-section-title">🔁 Swaps — vereceklerin (tıkla, seç)</div>
+      <div id="trade-swap-list">${renderCartBlocks(swapBlocks, state.selectedSwap, "Swap'ta işaretli kartın yok.")}</div>
+      <div class="trade-section-title">📋 Missings — almak istediklerin (tıkla, seç)</div>
+      <div id="trade-missing-list">${renderCartBlocks(missingBlocks, state.selectedMissing, "Eksik kartın yok, tebrikler!")}</div>
+      <div class="trade-footer">
+        <div class="trade-count">${state.selectedSwap.size} swap · ${state.selectedMissing.size} missing seçili</div>
+        <div class="modal-actions">
+          <button class="btn-secondary" id="trade-cancel">Vazgeç</button>
+          <button class="btn-primary" id="trade-finish" ${total === 0 ? "disabled" : ""}>Finish Trade</button>
+        </div>
+      </div>
+    `;
+  }
+
+  // stage === "summary"
+  const swapList = [...state.selectedSwap];
+  const missingList = [...state.selectedMissing];
+  return `
+    ${panelHeaderHtml(collector, collector)}
+    <div class="trade-summary">
+      <div class="trade-section-title">📤 Vereceklerin (Swap)</div>
+      <div class="cards-grid">${swapList.length ? swapList.map((c) => cartCardHtml(c, true)).join("") : '<div class="swap-empty-msg">Seçim yok</div>'}</div>
+      <div class="trade-section-title">📥 Alacakların (Missing)</div>
+      <div class="cards-grid">${missingList.length ? missingList.map((c) => cartCardHtml(c, true)).join("") : '<div class="swap-empty-msg">Seçim yok</div>'}</div>
+      <div style="text-align:center;margin-top:20px;">
+        <button class="btn-primary" id="trade-reset">Yeni Trade</button>
+      </div>
+    </div>
+  `;
+}
+
+function attachTradeMakerEvents(route) {
+  attachPanelHeaderEvents(route.collector);
+  const { collector } = route;
+  const state = getTradeState(collector);
+
+  const startBtn = document.getElementById("trade-start");
+  if (startBtn) startBtn.addEventListener("click", () => { state.stage = "building"; render(); });
+
+  const cancelBtn = document.getElementById("trade-cancel");
+  if (cancelBtn) cancelBtn.addEventListener("click", () => { resetTradeState(collector); render(); });
+
+  const finishBtn = document.getElementById("trade-finish");
+  if (finishBtn) finishBtn.addEventListener("click", () => { state.stage = "summary"; render(); });
+
+  const resetBtn = document.getElementById("trade-reset");
+  if (resetBtn) resetBtn.addEventListener("click", () => { resetTradeState(collector); render(); });
+
+  const swapList = document.getElementById("trade-swap-list");
+  if (swapList) swapList.querySelectorAll(".cart-card").forEach((el) => {
+    el.addEventListener("click", () => { toggleInSet(state.selectedSwap, el.dataset.code); render(); });
+  });
+  const missingList = document.getElementById("trade-missing-list");
+  if (missingList) missingList.querySelectorAll(".cart-card").forEach((el) => {
+    el.addEventListener("click", () => { toggleInSet(state.selectedMissing, el.dataset.code); render(); });
   });
 }
 

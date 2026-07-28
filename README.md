@@ -92,7 +92,7 @@ tamamlanma yüzdeleri şu değerlerle eşleşmeli:
 | Efe | 691 | 352 |
 | Cenk | 615 | 426 |
 | Andaç | 528 | 487 |
-| Andaç D. | 1273 | 240 |
+| Andaç D | 1273 | 240 |
 | Berker | 684 | 472 |
 | Arda | 0 | 980 |
 

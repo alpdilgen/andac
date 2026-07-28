@@ -114,3 +114,16 @@ function prevCountryInGroup(g, code) {
   if (idx === -1) return null;
   return list[(idx - 1 + list.length) % list.length];
 }
+
+// Gruplar arası geçiş (A → B → ... → L → A, döngüsel)
+function nextGroupKey(g) {
+  const idx = GROUP_ORDER.indexOf(g);
+  if (idx === -1) return null;
+  return GROUP_ORDER[(idx + 1) % GROUP_ORDER.length];
+}
+
+function prevGroupKey(g) {
+  const idx = GROUP_ORDER.indexOf(g);
+  if (idx === -1) return null;
+  return GROUP_ORDER[(idx - 1 + GROUP_ORDER.length) % GROUP_ORDER.length];
+}

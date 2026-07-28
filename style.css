@@ -514,6 +514,17 @@ h1, h2, h3, .display {
   color: var(--text-faint);
 }
 
+.group-box .g-countries {
+  margin-top: 4px;
+  font-size: 0.66rem;
+  line-height: 1.3;
+  color: var(--text-faint);
+}
+
+.group-box.fwc-tile {
+  border-style: dashed;
+}
+
 .group-box.complete {
   border-color: var(--green);
   box-shadow: 0 0 0 1px var(--green), var(--shadow);
@@ -869,4 +880,67 @@ h1, h2, h3, .display {
 
 @media (min-width: 900px) {
   .container { max-width: 880px; }
+}
+
+/* ---------- Trade Maker ---------- */
+.trade-intro {
+  text-align: center;
+  padding: 40px 16px;
+}
+
+.trade-intro .welcome-text {
+  margin-bottom: 20px;
+  line-height: 1.5;
+}
+
+.trade-section-title {
+  font-family: var(--font-display);
+  font-size: 1rem;
+  letter-spacing: 0.03em;
+  color: var(--text-dim);
+  margin: 18px 4px 8px;
+}
+
+.trade-footer {
+  position: sticky;
+  bottom: 0;
+  background: rgba(13, 18, 16, 0.95);
+  backdrop-filter: blur(6px);
+  border-top: 1px solid var(--line);
+  padding: 10px 4px 4px;
+  margin-top: 16px;
+}
+
+.trade-count {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  margin-bottom: 8px;
+}
+
+.trade-summary {
+  padding-bottom: 20px;
+}
+
+/* Sepet kartları: tek tıkla seç/kaldır, modal açmaz */
+.cart-card {
+  cursor: pointer;
+  background: var(--bg-panel-alt);
+  color: var(--text-dim);
+  border-color: var(--line);
+  transition: transform 0.1s ease, border-color 0.15s ease;
+}
+
+.cart-card:hover { transform: translateY(-1px); }
+
+.cart-card.cart-selected {
+  border-color: var(--green);
+  background: var(--green-dim);
+  color: var(--green);
+  box-shadow: 0 0 0 2px var(--green), var(--shadow);
+}
+
+.cart-card .cart-check {
+  font-size: 0.6rem;
+  color: var(--green);
 }
