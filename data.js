@@ -98,6 +98,7 @@ for (const code of FWC_CODE_LIST) {
 
 // Kolaylık: grup içindeki ülke sırası (önceki/sonraki geçiş için)
 function countriesInGroup(g) {
+  if (!GROUPS[g]) return [];
   return GROUPS[g].map(([name, code]) => ({ name, code }));
 }
 
