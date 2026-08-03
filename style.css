@@ -220,8 +220,7 @@ h1, h2, h3, .display {
   z-index: 20;
   display: flex;
   gap: 4px;
-  background: rgba(13, 18, 16, 0.92);
-  backdrop-filter: blur(6px);
+  background: var(--bg);
   border-bottom: 1px solid var(--line);
   padding: 8px 8px;
   overflow-x: auto;
@@ -569,8 +568,23 @@ h1, h2, h3, .display {
 /* ---------- Undo bar ---------- */
 .undo-bar {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   padding: 4px 4px 10px;
+}
+
+.undo-preview-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.undo-preview {
+  font-size: 0.72rem;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .undo-btn {
@@ -580,6 +594,8 @@ h1, h2, h3, .display {
   border-radius: 999px;
   padding: 6px 14px;
   font-size: 0.78rem;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .undo-btn:disabled { opacity: 0.4; cursor: default; }
@@ -735,6 +751,7 @@ h1, h2, h3, .display {
   font-weight: 700;
   gap: 3px;
   position: relative;
+  contain: layout paint style;
 }
 
 .sc-status-badge {
@@ -891,6 +908,11 @@ h1, h2, h3, .display {
 /* ---------- Missing sekmesi ---------- */
 .missing-country-block {
   margin-bottom: 22px;
+  /* Ekran dışındaki bloklar için tarayıcı layout/paint işini atlar — Missing/Swap
+     Stickers gibi 400+ kartlık sayfalarda kaydırma performansını ciddi ölçüde artırır.
+     Desteklemeyen tarayıcılarda özellik sessizce yok sayılır, hiçbir bozulma olmaz. */
+  content-visibility: auto;
+  contain-intrinsic-size: 0 220px;
 }
 
 .missing-country-block .mc-title {
@@ -1042,8 +1064,7 @@ h1, h2, h3, .display {
 .trade-footer {
   position: sticky;
   bottom: 0;
-  background: rgba(13, 18, 16, 0.95);
-  backdrop-filter: blur(6px);
+  background: var(--bg);
   border-top: 1px solid var(--line);
   padding: 10px 4px 4px;
   margin-top: 16px;
@@ -1166,4 +1187,79 @@ h1, h2, h3, .display {
   padding: 10px 14px;
   font-size: 0.85rem;
   margin-top: 16px;
+}
+
+/* ---------- Swap History (Trade Maker içinde) ---------- */
+.trade-history {
+  padding-bottom: 10px;
+}
+
+.trade-history-entry {
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  box-shadow: var(--shadow);
+}
+
+.trade-history-entry .the-date {
+  font-family: var(--font-display);
+  font-size: 0.78rem;
+  color: var(--text-faint);
+  margin-bottom: 6px;
+}
+
+.trade-history-entry .the-row {
+  font-size: 0.85rem;
+  margin-top: 3px;
+  word-break: break-word;
+}
+
+.trade-history-entry .the-label {
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.trade-history-entry .the-label.out { color: var(--red); }
+.trade-history-entry .the-label.in { color: var(--green); }
+
+/* ---------- Ortak Sayfa (Combo) ---------- */
+.combo-links-wrap {
+  margin-top: 22px;
+  text-align: center;
+}
+
+.combo-home-link {
+  display: block;
+  width: 100%;
+  max-width: 340px;
+  margin: 0 auto 10px;
+}
+
+.combo-legend {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  margin: 4px 0 16px;
+}
+
+.combo-legend-item b { color: var(--green); }
+
+.combo-card {
+  position: relative;
+}
+
+.combo-tag {
+  position: absolute;
+  top: 3px;
+  left: 4px;
+  font-size: 0.6rem;
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--green);
+  background: rgba(61, 220, 132, 0.15);
+  border-radius: 4px;
+  padding: 0 4px;
+  line-height: 1.3;
 }

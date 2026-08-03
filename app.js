@@ -8,36 +8,53 @@ firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
 // ---------- Yerel cache (Firebase'den canlı güncellenir) ----------
-const cache = { stickers: {}, swapCounts: {}, colors: {} };
-const loaded = { stickers: false, swapCounts: false, colors: false };
+const cache = { stickers: {}, swapCounts: {}, colors: {}, tradeHistory: {} };
+const loaded = { stickers: false, swapCounts: false, colors: false, tradeHistory: false };
 
 let activeCollector = null; // son ziyaret edilen panelin sahibi (bu oturumda arama için)
 const undoStacks = {}; // collector -> [{code, prevStatus, prevSwap}]
 let firstRenderDone = false;
 let modalState = null; // { collector, code, draftStatus, draftSwap } — aktif modal (varsa)
 let swapFinderTarget = null; // Swap Finder sekmesinde seçili karşılaştırma kişisi
-const tradeStates = {}; // collector -> { stage, activeList, confirmArmed, selectedSwap:Set, selectedMissing:Set }
+const tradeStates = {}; // collector -> { stage, activeList, confirmArmed, showHistory, selectedSwap:Set, selectedMissing:Set }
 const lastTradeLog = {}; // collector -> [{code, prevStatus, prevSwap}] (son onaylanan trade — toplu geri alma için) veya null
+// Ortak Sayfa (Combo) tanımları — parseHash() bu sabite erişiyor, bu yüzden dosyanın en
+// üstünde olmalı (aksi halde senkron Firebase callback'lerinde TDZ hatası oluşabilir).
+const COMBO_PAIRS = [
+  { key: "andac-d-berker", label: "Andaç D & Berker", members: [
+    { collector: "Andaç D", tag: "A" },
+    { collector: "Berker", tag: "B" },
+  ] },
+];
 
 
-db.ref("/stickers").on("value", (snap) => {
-  cache.stickers = snap.val() || {};
-  loaded.stickers = true;
-  tryRender();
-});
-db.ref("/swapCounts").on("value", (snap) => {
-  cache.swapCounts = snap.val() || {};
-  loaded.swapCounts = true;
-  tryRender();
-});
-db.ref("/colors").on("value", (snap) => {
-  cache.colors = snap.val() || {};
-  loaded.colors = true;
-  tryRender();
-});
+// Her .on("value") çağrısı, kendi yazdığın veriyi de Firebase'den "yankı" olarak geri
+// alır. setStatus/undoLast/setColor zaten anlık optimistic render() yapıyor; birkaç yüz
+// ms sonra gelen bu yankı AYNI veriyle tekrar tam bir render tetikliyordu — özellikle
+// Missing/Swap Stickers gibi 400+ kartlık sayfalarda, art arda çok işlem yapınca bu
+// gereksiz çift render'lar birikip kaydırma sırasında takılmaya yol açıyordu.
+// Çözüm: gelen veri gerçekten değişmediyse (kendi yazdığımızın yankısıysa) render() atla.
+const lastSnapshotJSON = { stickers: null, swapCounts: null, colors: null, tradeHistory: null };
+
+function handleSnapshot(key, snap) {
+  const val = snap.val() || {};
+  const json = JSON.stringify(val);
+  const changed = json !== lastSnapshotJSON[key];
+  lastSnapshotJSON[key] = json;
+  cache[key] = val;
+  loaded[key] = true;
+  if (changed || !firstRenderDone) tryRender();
+}
+
+db.ref("/stickers").on("value", (snap) => handleSnapshot("stickers", snap));
+db.ref("/swapCounts").on("value", (snap) => handleSnapshot("swapCounts", snap));
+db.ref("/colors").on("value", (snap) => handleSnapshot("colors", snap));
+// Takas geçmişi — /stickers, /swapCounts, /colors'tan bağımsız, ek/yeni bir veri yolu.
+// Onaylanan her trade burada bir kayıt bırakır; sadece görüntüleme amaçlı (Swap History).
+db.ref("/tradeHistory").on("value", (snap) => handleSnapshot("tradeHistory", snap));
 
 function tryRender() {
-  if (!(loaded.stickers && loaded.swapCounts && loaded.colors)) return;
+  if (!(loaded.stickers && loaded.swapCounts && loaded.colors && loaded.tradeHistory)) return;
   render();
   firstRenderDone = true;
 }
@@ -96,6 +113,11 @@ function applyLocal(collector, code, status, swapCount) {
   cache.stickers[collector][code] = status;
   if (status === "swap") cache.swapCounts[collector][code] = swapCount || 1;
   else delete cache.swapCounts[collector][code];
+  // Anlık (optimistic) yazmayı da "son bilinen anlık görüntü" olarak işaretle.
+  // Böylece birazdan Firebase'den kendi yazdığımızın yankısı geldiğinde içerik
+  // zaten eşleşiyor olur ve gereksiz bir render() tetiklenmez (bkz. handleSnapshot).
+  lastSnapshotJSON.stickers = JSON.stringify(cache.stickers);
+  lastSnapshotJSON.swapCounts = JSON.stringify(cache.swapCounts);
 }
 
 function setStatus(collector, code, status, swapCount, opts) {
@@ -132,6 +154,7 @@ function undoLast(collector) {
 
 function setColor(collector, hex) {
   cache.colors[collector] = hex;
+  lastSnapshotJSON.colors = JSON.stringify(cache.colors);
   db.ref(`/colors/${collector}`).set(hex).catch(() => showToast("Bağlantı sorunu, tekrar deneyin", true));
 }
 
@@ -143,6 +166,13 @@ function parseHash() {
   const params = new URLSearchParams(query || "");
   const parts = path.split("/").filter((p) => p.length).map(decodeURIComponent);
   if (parts.length === 0) return { view: "home" };
+
+  if (parts[0] === "combo") {
+    const comboKey = parts[1];
+    if (!COMBO_PAIRS.some((c) => c.key === comboKey)) return { view: "home" };
+    return { view: "combo", comboKey };
+  }
+
   const collector = parts[0];
   if (!COLLECTORS.includes(collector)) return { view: "home" };
   activeCollector = collector;
@@ -202,9 +232,15 @@ function showToast(msg, isError) {
 }
 
 // ---------- Konfeti ----------
+let activeConfettiCount = 0;
+const MAX_ACTIVE_CONFETTI = 140; // art arda çok hızlı işlemde DOM'da birikmeyi önler
+
 function fireConfetti() {
+  if (activeConfettiCount >= MAX_ACTIVE_CONFETTI) return; // zaten çok fazla parça varsa yeni patlama atla
   const colors = ["#3ddc84", "#e6b649", "#e0574f", "#4fa8e0", "#c179e0", "#f2f2f2"];
   const n = 36;
+  const fragment = document.createDocumentFragment();
+  const pieces = [];
   for (let i = 0; i < n; i++) {
     const piece = document.createElement("div");
     piece.className = "confetti-piece";
@@ -212,9 +248,15 @@ function fireConfetti() {
     piece.style.background = colors[Math.floor(Math.random() * colors.length)];
     piece.style.animationDuration = (1.6 + Math.random() * 1.2) + "s";
     piece.style.opacity = "0.9";
-    document.body.appendChild(piece);
-    setTimeout(() => piece.remove(), 3000);
+    fragment.appendChild(piece);
+    pieces.push(piece);
   }
+  document.body.appendChild(fragment); // tek reflow, 36 ayrı yerine
+  activeConfettiCount += pieces.length;
+  setTimeout(() => {
+    for (const piece of pieces) piece.remove();
+    activeConfettiCount -= pieces.length;
+  }, 3000);
 }
 
 // ---------- Modal ----------
@@ -316,7 +358,7 @@ function checkContainerComplete(collector, code) {
 // RENDER
 // ============================================================
 function render() {
-  if (!(loaded.stickers && loaded.swapCounts && loaded.colors)) {
+  if (!(loaded.stickers && loaded.swapCounts && loaded.colors && loaded.tradeHistory)) {
     renderLoading();
     return;
   }
@@ -335,6 +377,7 @@ function render() {
     case "swapstickers": app.innerHTML = renderSwapStickers(route); attachPanelHeaderEvents(route.collector); attachCardEvents(route.collector); break;
     case "swap": app.innerHTML = renderSwapFinder(route); attachSwapFinderEvents(route); break;
     case "trade": app.innerHTML = renderTradeMaker(route); attachTradeMakerEvents(route); break;
+    case "combo": app.innerHTML = renderComboPage(route.comboKey); attachComboEvents(route.comboKey); break;
     case "group": app.innerHTML = renderGroupCountries(route); attachGroupCountriesEvents(route); break;
     case "country": app.innerHTML = renderCountryCards(route); attachCountryCardsEvents(route); scrollToHighlight(route.highlight); break;
     default: app.innerHTML = renderHome(); attachHomeEvents();
@@ -358,6 +401,10 @@ function renderBreadcrumb(route) {
   const wrap = document.getElementById("breadcrumb-wrap");
   if (route.view === "home") { wrap.innerHTML = ""; return; }
   const crumbs = [{ label: "Ana Sayfa", hash: "#/" }];
+  if (route.view === "combo") {
+    const combo = COMBO_PAIRS.find((c) => c.key === route.comboKey);
+    crumbs.push({ label: combo ? combo.label : "Ortak Sayfa", hash: null });
+  }
   if (route.collector) crumbs.push({ label: route.collector, hash: `${collectorHash(route.collector)}/groups` });
   if (route.view === "group" || route.view === "country") {
     crumbs.push({ label: `${route.group} Grubu`, hash: `${collectorHash(route.collector)}/grup/${route.group}` });
@@ -435,6 +482,10 @@ function renderHome() {
     </div>`;
   }).join("");
 
+  const comboLinks = COMBO_PAIRS.map((c) =>
+    `<button class="btn-secondary combo-home-link" data-combo="${esc(c.key)}">🤝 ${esc(c.label)} — Ortak Sayfa</button>`
+  ).join("");
+
   return `
     <div class="welcome-text">Hoş Geldiniz! Herkesin albümü burada.</div>
     <div class="ball-loader-wrap" style="padding:10px 0 4px;">
@@ -445,6 +496,7 @@ function renderHome() {
     <div class="section-divider">🏆 Sıralama</div>
     <div class="leaderboard">${rows}</div>
     <div class="swap-pool">Toplam Swap Havuzu: <b>${totalSwapPool()}</b> kart</div>
+    ${comboLinks ? `<div class="combo-links-wrap">${comboLinks}</div>` : ""}
   `;
 }
 
@@ -454,6 +506,9 @@ function attachHomeEvents() {
       const c = b.dataset.collector;
       go(collectorHash(c));
     });
+  });
+  document.querySelectorAll("[data-combo]").forEach((b) => {
+    b.addEventListener("click", () => go(`#/combo/${b.dataset.combo}`));
   });
 }
 
@@ -560,15 +615,26 @@ function attachColorEvents(collector, isEdit) {
 }
 
 // ---------- Panel header + undo (ortak) ----------
+function statusLabel(st) {
+  return st === "owned" ? "Owned" : st === "swap" ? "Swap" : "Missing";
+}
+
 function panelHeaderHtml(collector, title) {
   const color = getColor(collector);
   const stack = undoStacks[collector] || [];
+  const last = stack[stack.length - 1];
+  let preview = "";
+  if (last) {
+    const currentSt = getStatus(collector, last.code);
+    preview = `<div class="undo-preview">${esc(last.code)}: ${statusLabel(currentSt)} → ${statusLabel(last.prevStatus)}</div>`;
+  }
   return `
     <div class="panel-header" style="${color ? `--box-color:${color}` : ""}">
       <div class="who">${esc(title)}</div>
       <button class="icon-btn" id="settings-btn" title="Rengi değiştir">⚙️</button>
     </div>
     <div class="undo-bar">
+      <div class="undo-preview-wrap">${preview}</div>
       <button class="undo-btn" id="undo-btn" ${stack.length ? "" : "disabled"}>↩ Geri Al${stack.length ? ` (${stack.length})` : ""}</button>
     </div>
   `;
@@ -791,6 +857,84 @@ function renderSwapStickers(route) {
   `;
 }
 
+// ---------- Ortak Sayfa (Combo) — birden fazla kişinin swap/missing'ini tek yerde toplar ----------
+// Şu an tek çift tanımlı: Andaç D & Berker. İleride başka çiftler eklenmek istenirse
+// COMBO_PAIRS sabitine (dosya başında) yeni bir { key, label, members:[{collector,tag}, ...] } girişi eklemek yeterli.
+// Birden fazla kişinin aynı statüdeki kartlarını, kanonik grup sırasıyla, kime ait olduğu
+// bilgisiyle (tag) birlikte tek bir blok listesinde toplar.
+function collectComboBlocks(members, status) {
+  const blocks = [];
+  for (const g of GROUP_ORDER) {
+    for (const [name, code] of GROUPS[g]) {
+      const items = [];
+      for (const { collector, tag } of members) {
+        for (const stickerCode of COUNTRY_CODES[code]) {
+          if (getStatus(collector, stickerCode) === status) items.push({ code: stickerCode, collector, tag });
+        }
+      }
+      if (items.length) blocks.push({ title: `${countryFlag(name)} ${name}`, items });
+    }
+  }
+  const fwcItems = [];
+  for (const { collector, tag } of members) {
+    for (const stickerCode of FWC_CODE_LIST) {
+      if (getStatus(collector, stickerCode) === status) fwcItems.push({ code: stickerCode, collector, tag });
+    }
+  }
+  if (fwcItems.length) blocks.push({ title: "⚽ FWC", items: fwcItems });
+  return blocks;
+}
+
+// Combo sayfasındaki kart: kime ait olduğunu (A)/(B) etiketiyle gösterir, tıklanınca
+// doğru kişinin kendi verisini değiştiren aynı modalı açar (yanlış kişiye yazma riski yok).
+function comboCardHtml(item) {
+  const { code, collector, tag } = item;
+  const st = getStatus(collector, code);
+  const meta = STICKER_INDEX[code];
+  const icon = meta.group === "FWC" ? "⚽" : meta.flag;
+  const swapN = st === "swap" ? (getSwapCount(collector, code) || 1) : 0;
+  const statusIcon = st === "owned" ? "✅" : st === "swap" ? "🔁" : "❌";
+  return `<div class="sticker-card status-${st} combo-card" data-code="${esc(code)}" data-collector="${esc(collector)}" title="${esc(collector)}">
+    <div class="combo-tag">${esc(tag)}</div>
+    <div class="sc-status-badge">${statusIcon}</div>
+    <div>${icon}</div>
+    <div>${esc(code)}</div>
+    ${st === "swap" ? `<div class="swap-tag">Swap (${swapN})</div>` : ""}
+  </div>`;
+}
+
+function renderComboBlocks(blocks, emptyMsg) {
+  if (!blocks.length) return `<div class="swap-empty-msg">${esc(emptyMsg)}</div>`;
+  return blocks.map((b) => `<div class="missing-country-block">
+      <div class="mc-title">${esc(b.title)}</div>
+      <div class="cards-grid">${b.items.map(comboCardHtml).join("")}</div>
+    </div>`).join("");
+}
+
+function renderComboPage(comboKey) {
+  const combo = COMBO_PAIRS.find((c) => c.key === comboKey);
+  if (!combo) return `<div class="center-msg">Ortak sayfa bulunamadı.</div>`;
+  const swapBlocks = collectComboBlocks(combo.members, "swap");
+  const missingBlocks = collectComboBlocks(combo.members, "missing");
+  const legend = combo.members.map((m) => `<span class="combo-legend-item"><b>${esc(m.tag)}</b> = ${esc(m.collector)}</span>`).join(" · ");
+  return `
+    <div class="panel-header">
+      <div class="who">🤝 ${esc(combo.label)}</div>
+    </div>
+    <div class="combo-legend">${legend}</div>
+    <div class="trade-section-title">🔁 Swaps (İkisi Birlikte)</div>
+    ${renderComboBlocks(swapBlocks, "İkisinde de şu an swap'ta işaretli kart yok.")}
+    <div class="trade-section-title">📋 Missing (İkisi Birlikte)</div>
+    ${renderComboBlocks(missingBlocks, "İkisinin de eksiği yok, tebrikler!")}
+  `;
+}
+
+function attachComboEvents() {
+  document.querySelectorAll(".combo-card").forEach((el) => {
+    el.addEventListener("click", () => openCardModal(el.dataset.collector, el.dataset.code));
+  });
+}
+
 // ---------- Swap Finder sekmesi ----------
 function renderSwapFinder(route) {
   const { collector } = route;
@@ -856,12 +1000,12 @@ function attachSwapFinderEvents(route) {
 // ---------- Trade Maker sekmesi ----------
 function getTradeState(collector) {
   if (!tradeStates[collector]) {
-    tradeStates[collector] = { stage: "intro", activeList: null, confirmArmed: false, selectedSwap: new Set(), selectedMissing: new Set() };
+    tradeStates[collector] = { stage: "intro", activeList: null, confirmArmed: false, showHistory: false, selectedSwap: new Set(), selectedMissing: new Set() };
   }
   return tradeStates[collector];
 }
 function resetTradeState(collector) {
-  tradeStates[collector] = { stage: "intro", activeList: null, confirmArmed: false, selectedSwap: new Set(), selectedMissing: new Set() };
+  tradeStates[collector] = { stage: "intro", activeList: null, confirmArmed: false, showHistory: false, selectedSwap: new Set(), selectedMissing: new Set() };
 }
 function toggleInSet(set, code) {
   if (set.has(code)) set.delete(code); else set.add(code);
@@ -914,6 +1058,8 @@ function confirmTrade(collector, state) {
   }
 
   const log = [];
+  const appliedGiven = [];
+  const appliedReceived = [];
   for (const code of state.selectedSwap) {
     if (getStatus(collector, code) !== "swap") continue; // arada başka yerden değişmiş olabilir, dokunma
     const prevStatus = getStatus(collector, code);
@@ -922,6 +1068,7 @@ function confirmTrade(collector, state) {
     if (newCount > 0) setStatus(collector, code, "swap", newCount, { silentRender: true, silentToast: true });
     else setStatus(collector, code, "owned", null, { silentRender: true, silentToast: true });
     log.push({ code, prevStatus, prevSwap });
+    appliedGiven.push(code);
   }
   for (const code of state.selectedMissing) {
     if (getStatus(collector, code) !== "missing") continue; // arada başka yerden değişmiş olabilir, dokunma
@@ -929,6 +1076,7 @@ function confirmTrade(collector, state) {
     const prevSwap = getSwapCount(collector, code);
     setStatus(collector, code, "owned", null, { silentRender: true, silentToast: true });
     log.push({ code, prevStatus, prevSwap });
+    appliedReceived.push(code);
   }
   lastTradeLog[collector] = log.length ? log : null;
 
@@ -936,7 +1084,7 @@ function confirmTrade(collector, state) {
   for (const [key, info] of containersBefore) {
     if (!info.wasComplete && codesCompletion(info.codes, collector).missing === 0) newlyCompleted.push(key);
   }
-  return { changed: log.length, newlyCompleted };
+  return { changed: log.length, newlyCompleted, given: appliedGiven, received: appliedReceived };
 }
 
 // Son onaylanan trade'i tek seferde geri alır (undo stack'in 3 sınırından bağımsız).
@@ -955,17 +1103,57 @@ function undoLastTrade(collector) {
   render();
 }
 
+// Bir kişinin en son N takasını (yeniden eskiye) döndürür.
+function getTradeHistoryList(collector, limit) {
+  const raw = cache.tradeHistory[collector] || {};
+  const entries = Object.values(raw);
+  entries.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  return entries.slice(0, limit);
+}
+
+function formatTradeTimestamp(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  const datePart = d.toLocaleDateString("tr-TR", { day: "2-digit", month: "2-digit" });
+  const timePart = d.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" });
+  return `${datePart} ${timePart}`;
+}
+
+function renderTradeHistoryEntry(entry) {
+  const given = (entry.given && entry.given.length) ? entry.given.join(", ") : "—";
+  const received = (entry.received && entry.received.length) ? entry.received.join(", ") : "—";
+  return `<div class="trade-history-entry">
+    <div class="the-date">${esc(formatTradeTimestamp(entry.timestamp))}</div>
+    <div class="the-row"><span class="the-label out">📤 Verildi:</span> ${esc(given)}</div>
+    <div class="the-row"><span class="the-label in">📥 Alındı:</span> ${esc(received)}</div>
+  </div>`;
+}
+
 function renderTradeMaker(route) {
   const { collector } = route;
   const state = getTradeState(collector);
 
   if (state.stage === "intro") {
+    if (state.showHistory) {
+      const history = getTradeHistoryList(collector, 5);
+      return `
+        ${panelHeaderHtml(collector, collector)}
+        <div class="trade-history">
+          <div class="trade-section-title">📜 Son 5 Takas</div>
+          ${history.length ? history.map(renderTradeHistoryEntry).join("") : '<div class="swap-empty-msg">Henüz takas geçmişin yok.</div>'}
+          <div style="text-align:center;margin-top:16px;">
+            <button class="btn-secondary" id="trade-history-back">← Geri</button>
+          </div>
+        </div>
+      `;
+    }
     const hasLastTrade = lastTradeLog[collector] && lastTradeLog[collector].length > 0;
     return `
       ${panelHeaderHtml(collector, collector)}
       <div class="trade-intro">
         <div class="welcome-text">Bir arkadaşınla takas yapmadan önce burada teklifini hazırla:<br>vereceğin swap kartlarını ve almak istediğin eksik kartları seç.</div>
         <button class="btn-primary" id="trade-start">+ Create a Trade</button>
+        <div style="margin-top:12px;"><button class="btn-secondary" id="trade-history-btn">📜 Swap History</button></div>
         ${hasLastTrade ? `<div style="margin-top:16px;"><button class="undo-btn" id="trade-undo-last">↩ Son Trade'i Geri Al (${lastTradeLog[collector].length} kart)</button></div>` : ""}
       </div>
     `;
@@ -1041,6 +1229,12 @@ function attachTradeMakerEvents(route) {
   const startBtn = document.getElementById("trade-start");
   if (startBtn) startBtn.addEventListener("click", () => { state.stage = "building"; render(); });
 
+  const historyBtn = document.getElementById("trade-history-btn");
+  if (historyBtn) historyBtn.addEventListener("click", () => { state.showHistory = true; render(); });
+
+  const historyBackBtn = document.getElementById("trade-history-back");
+  if (historyBackBtn) historyBackBtn.addEventListener("click", () => { state.showHistory = false; render(); });
+
   const undoLastBtn = document.getElementById("trade-undo-last");
   if (undoLastBtn) undoLastBtn.addEventListener("click", () => undoLastTrade(collector));
 
@@ -1066,6 +1260,14 @@ function attachTradeMakerEvents(route) {
   const confirmYesBtn = document.getElementById("trade-confirm-yes");
   if (confirmYesBtn) confirmYesBtn.addEventListener("click", () => {
     const result = confirmTrade(collector, state);
+    if (result.changed > 0) {
+      // Takas geçmişi kaydı — sadece görüntüleme amaçlı, /stickers'a hiç dokunmaz.
+      db.ref(`/tradeHistory/${collector}`).push({
+        timestamp: Date.now(),
+        given: result.given,
+        received: result.received,
+      }).catch(() => {}); // geçmiş kaydı kritik değil, sessizce yut
+    }
     fireConfetti();
     if (result.newlyCompleted.length) {
       const names = result.newlyCompleted.map(containerLabelForKey).join(", ");
@@ -1172,20 +1374,24 @@ searchInputEl.addEventListener("blur", () => {
 });
 
 // ---------- Header kaydırınca kaybolur + yukarı kaydır butonu ----------
-let lastScrollY = 0;
-window.addEventListener("scroll", () => {
+// requestAnimationFrame ile throttle edilir: ham "scroll" olayı saniyede
+// onlarca kez tetiklenebilir (özellikle dokunmatik kaydırmada); her tetiklenmede
+// DOM okuma/yazma yapmak yerine, kare başına en fazla bir kez işlem yapılır.
+let scrollTicking = false;
+function handleScrollFrame() {
+  const y = window.scrollY;
   const header = document.getElementById("site-header");
-  if (header) {
-    if (window.scrollY > 40) header.classList.add("hidden");
-    else header.classList.remove("hidden");
-  }
+  if (header) header.classList.toggle("hidden", y > 40);
   const topBtn = document.getElementById("scroll-top-btn");
-  if (topBtn) {
-    if (window.scrollY > 400) topBtn.classList.add("visible");
-    else topBtn.classList.remove("visible");
-  }
-  lastScrollY = window.scrollY;
-});
+  if (topBtn) topBtn.classList.toggle("visible", y > 400);
+  scrollTicking = false;
+}
+window.addEventListener("scroll", () => {
+  if (scrollTicking) return;
+  scrollTicking = true;
+  requestAnimationFrame(handleScrollFrame);
+}, { passive: true });
+
 document.getElementById("scroll-top-btn").addEventListener("click", () => {
   window.scrollTo({ top: 0, behavior: "smooth" });
 });
