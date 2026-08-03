@@ -59,14 +59,60 @@ function tryRender() {
   firstRenderDone = true;
 }
 
+// ---------- Ortak Sayfa (Combo) yardımcıları ----------
+// Combo id'ler gerçek Firebase collector'ları DEĞİLDİR — sadece "combo:<key>" biçiminde
+// bir routing/görüntüleme kimliğidir. Asla setStatus/setColor'a bu id ile yazılmaz;
+// her yazma işlemi mutlaka gerçek üyenin (Andaç D / Berker) adıyla yapılır.
+function isComboId(id) {
+  return typeof id === "string" && id.startsWith("combo:");
+}
+function comboMembersFor(id) {
+  const key = id.slice("combo:".length);
+  const combo = COMBO_PAIRS.find((c) => c.key === key);
+  return combo ? combo.members : [];
+}
+function comboDefFor(id) {
+  const key = id.slice("combo:".length);
+  return COMBO_PAIRS.find((c) => c.key === key) || null;
+}
+// Panelde başlık olarak gösterilecek isim: gerçek kişi için kendi adı, combo için etiketi.
+function collectorDisplayLabel(id) {
+  if (isComboId(id)) {
+    const combo = comboDefFor(id);
+    return combo ? combo.label : id;
+  }
+  return id;
+}
+const COMBO_COLOR = "#8a8fff"; // combo panelleri için sabit, gerçek kullanıcı renkleriyle çakışmayan ayırt edici renk
+
 // ---------- Veri erişim yardımcıları ----------
 function getStatus(collector, code) {
+  if (isComboId(collector)) {
+    // Birleşik mantık: biri owned ise owned (evde zaten var); değilse biri swap ise
+    // swap (evde fazlalık var, ama ikisi de "sahip" değil); ikisi de yoksa missing.
+    let anySwap = false;
+    for (const { collector: c } of comboMembersFor(collector)) {
+      const st = (cache.stickers[c] && cache.stickers[c][code]) || "missing";
+      if (st === "owned") return "owned";
+      if (st === "swap") anySwap = true;
+    }
+    return anySwap ? "swap" : "missing";
+  }
   return (cache.stickers[collector] && cache.stickers[collector][code]) || "missing";
 }
 function getSwapCount(collector, code) {
+  if (isComboId(collector)) {
+    let total = 0;
+    for (const { collector: c } of comboMembersFor(collector)) {
+      const st = (cache.stickers[c] && cache.stickers[c][code]) || "missing";
+      if (st === "swap") total += (cache.swapCounts[c] && cache.swapCounts[c][code]) || 1;
+    }
+    return total;
+  }
   return (cache.swapCounts[collector] && cache.swapCounts[collector][code]) || 0;
 }
 function getColor(collector) {
+  if (isComboId(collector)) return COMBO_COLOR;
   return (cache.colors && cache.colors[collector]) || null;
 }
 
@@ -159,6 +205,10 @@ function setColor(collector, hex) {
 }
 
 // ---------- Router ----------
+function isValidCollectorId(id) {
+  return COLLECTORS.includes(id) || isComboId(id);
+}
+
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, "");
   if (!raw) return { view: "home" };
@@ -167,18 +217,13 @@ function parseHash() {
   const parts = path.split("/").filter((p) => p.length).map(decodeURIComponent);
   if (parts.length === 0) return { view: "home" };
 
-  if (parts[0] === "combo") {
-    const comboKey = parts[1];
-    if (!COMBO_PAIRS.some((c) => c.key === comboKey)) return { view: "home" };
-    return { view: "combo", comboKey };
-  }
-
   const collector = parts[0];
-  if (!COLLECTORS.includes(collector)) return { view: "home" };
+  if (!isValidCollectorId(collector)) return { view: "home" };
   activeCollector = collector;
   if (parts.length === 1) return { view: "panel-entry", collector };
   const second = parts[1];
-  if (second === "renk") return { view: "color-edit", collector };
+  // Combo panelinde gerçek bir renk yok — "renk" rotası anlamsız, Gruplar'a düş.
+  if (second === "renk") return isComboId(collector) ? { view: "groups", collector } : { view: "color-edit", collector };
   if (second === "grup") {
     const g = parts[2];
     const countryCode = parts[3];
@@ -261,7 +306,13 @@ function fireConfetti() {
 
 // ---------- Modal ----------
 function openCardModal(collector, code) {
-  modalState = { collector, code, draftStatus: getStatus(collector, code), draftSwap: getSwapCount(collector, code) || 1 };
+  if (isComboId(collector)) {
+    // Birleşik (tek slotlu) görünümde bir kart iki farklı gerçek kişiye ait olabilir —
+    // önce "kimin için değiştiriyorsun" sorulur, gerçek kişi seçilene kadar yazma yapılmaz.
+    modalState = { collector, code, comboChoosing: true, realCollector: null, draftStatus: null, draftSwap: 1 };
+  } else {
+    modalState = { collector, code, comboChoosing: false, realCollector: collector, draftStatus: getStatus(collector, code), draftSwap: getSwapCount(collector, code) || 1 };
+  }
   renderModal();
 }
 function closeModal() {
@@ -272,15 +323,61 @@ function closeModal() {
 function renderModal() {
   const root = document.getElementById("modal-root");
   if (!modalState) { root.innerHTML = ""; return; }
-  const { collector, code, draftStatus, draftSwap } = modalState;
+  const { code } = modalState;
   const meta = STICKER_INDEX[code];
   const label = meta.group === "FWC" ? "⚽ FWC" : `${meta.flag} ${meta.countryName}`;
+
+  if (modalState.comboChoosing) {
+    const members = comboMembersFor(modalState.collector);
+    const rows = members.map(({ collector: c, tag }) => {
+      const st = getStatus(c, code);
+      const n = st === "swap" ? (getSwapCount(c, code) || 1) : 0;
+      const col = getColor(c) || "var(--text-faint)";
+      return `<button class="status-opt combo-person-opt" data-real="${esc(c)}">
+        <span class="cpo-name"><span class="cpo-dot" style="background:${col}"></span>(${esc(tag)}) ${esc(c)}</span>
+        <span class="cpo-status">${statusLabel(st)}${st === "swap" ? ` (${n})` : ""}</span>
+      </button>`;
+    }).join("");
+    root.innerHTML = `
+      <div class="modal-overlay" id="modal-overlay">
+        <div class="modal-box">
+          <h3>${esc(code)}</h3>
+          <div class="modal-sub">${esc(label)} — kimin için değiştiriyorsun?</div>
+          <div class="status-options">${rows}</div>
+          <div class="modal-actions">
+            <button class="btn-secondary" id="modal-cancel">Vazgeç</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById("modal-overlay").addEventListener("click", (e) => {
+      if (e.target.id === "modal-overlay") closeModal();
+    });
+    document.getElementById("modal-cancel").addEventListener("click", closeModal);
+    root.querySelectorAll(".combo-person-opt").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const real = btn.dataset.real;
+        modalState.comboChoosing = false;
+        modalState.realCollector = real;
+        modalState.draftStatus = getStatus(real, code);
+        modalState.draftSwap = getSwapCount(real, code) || 1;
+        renderModal();
+      });
+    });
+    return;
+  }
+
+  const { draftStatus, draftSwap, realCollector } = modalState;
+  const comboBackBtn = isComboId(modalState.collector)
+    ? `<div class="modal-sub" style="margin-top:-8px;">${esc(realCollector)} için düzenleniyor · <button class="combo-back-link" id="modal-combo-back">‹ değiştir</button></div>`
+    : "";
 
   root.innerHTML = `
     <div class="modal-overlay" id="modal-overlay">
       <div class="modal-box">
         <h3>${esc(code)}</h3>
         <div class="modal-sub">${esc(label)}</div>
+        ${comboBackBtn}
         <div class="status-options">
           <button class="status-opt ${draftStatus === "missing" ? "selected missing" : ""}" data-st="missing">Missing ${draftStatus === "missing" ? "✓" : ""}</button>
           <button class="status-opt ${draftStatus === "owned" ? "selected owned" : ""}" data-st="owned">Owned ${draftStatus === "owned" ? "✓" : ""}</button>
@@ -302,6 +399,12 @@ function renderModal() {
   document.getElementById("modal-overlay").addEventListener("click", (e) => {
     if (e.target.id === "modal-overlay") closeModal();
   });
+  const comboBack = document.getElementById("modal-combo-back");
+  if (comboBack) comboBack.addEventListener("click", () => {
+    modalState.comboChoosing = true;
+    modalState.realCollector = null;
+    renderModal();
+  });
   root.querySelectorAll(".status-opt").forEach((btn) => {
     btn.addEventListener("click", () => {
       modalState.draftStatus = btn.dataset.st;
@@ -321,15 +424,15 @@ function renderModal() {
   });
   document.getElementById("modal-cancel").addEventListener("click", closeModal);
   document.getElementById("modal-confirm").addEventListener("click", () => {
-    const { collector, code, draftStatus, draftSwap } = modalState;
-    const wasComplete100 = checkContainerComplete(collector, code);
-    setStatus(collector, code, draftStatus, draftStatus === "swap" ? (draftSwap || 1) : null);
+    const { code, draftStatus, draftSwap, realCollector } = modalState;
+    const wasComplete100 = checkContainerComplete(realCollector, code);
+    setStatus(realCollector, code, draftStatus, draftStatus === "swap" ? (draftSwap || 1) : null);
     if (draftStatus === "owned") fireConfetti();
     else {
-      const nowComplete = checkContainerComplete(collector, code);
+      const nowComplete = checkContainerComplete(realCollector, code);
       if (nowComplete && !wasComplete100) fireConfetti();
     }
-    flashCard(code);
+    flashCard(realCollector, code);
     closeModal();
   });
 }
@@ -338,9 +441,9 @@ function renderModal() {
 // yeşil parlama efektiyle vurgulanır — art arda birden fazla kart işaretlerken
 // "işte değişen bu" hissini verir. Kart artık listede yoksa (örn. Missing
 // sekmesinden çıkarıldıysa) sessizce hiçbir şey yapmaz.
-function flashCard(code) {
+function flashCard(collector, code) {
   requestAnimationFrame(() => {
-    const el = document.getElementById(`card-${code}`);
+    const el = document.getElementById(`card-${safeIdPart(collector)}-${code}`);
     if (!el) return;
     el.classList.add("just-changed");
     setTimeout(() => el.classList.remove("just-changed"), 700);
@@ -365,6 +468,7 @@ function render() {
   const route = parseHash();
   renderBreadcrumb(route);
   renderMiniNavbar(route);
+  updateSearchContextHint();
 
   const app = document.getElementById("app");
   switch (route.view) {
@@ -372,14 +476,13 @@ function render() {
     case "panel-entry": renderPanelEntry(route); break;
     case "color-edit": app.innerHTML = renderColorScreen(route.collector, true); attachColorEvents(route.collector, true); break;
     case "groups": app.innerHTML = renderGroups(route); attachGroupsEvents(route); break;
-    case "fwc": app.innerHTML = renderFwc(route); attachPanelHeaderEvents(route.collector); attachCardEvents(route.collector); scrollToHighlight(route.highlight); break;
-    case "missing": app.innerHTML = renderMissing(route); attachPanelHeaderEvents(route.collector); attachCardEvents(route.collector); break;
-    case "swapstickers": app.innerHTML = renderSwapStickers(route); attachPanelHeaderEvents(route.collector); attachCardEvents(route.collector); break;
+    case "fwc": app.innerHTML = renderFwc(route); attachPanelHeaderEvents(route.collector); attachCardEvents(); scrollToHighlight(route.collector, route.highlight); break;
+    case "missing": app.innerHTML = renderMissing(route); attachPanelHeaderEvents(route.collector); attachCardEvents(); break;
+    case "swapstickers": app.innerHTML = renderSwapStickers(route); attachPanelHeaderEvents(route.collector); attachCardEvents(); break;
     case "swap": app.innerHTML = renderSwapFinder(route); attachSwapFinderEvents(route); break;
     case "trade": app.innerHTML = renderTradeMaker(route); attachTradeMakerEvents(route); break;
-    case "combo": app.innerHTML = renderComboPage(route.comboKey); attachComboEvents(route.comboKey); break;
     case "group": app.innerHTML = renderGroupCountries(route); attachGroupCountriesEvents(route); break;
-    case "country": app.innerHTML = renderCountryCards(route); attachCountryCardsEvents(route); scrollToHighlight(route.highlight); break;
+    case "country": app.innerHTML = renderCountryCards(route); attachCountryCardsEvents(route); scrollToHighlight(route.collector, route.highlight); break;
     default: app.innerHTML = renderHome(); attachHomeEvents();
   }
   renderModal();
@@ -401,11 +504,7 @@ function renderBreadcrumb(route) {
   const wrap = document.getElementById("breadcrumb-wrap");
   if (route.view === "home") { wrap.innerHTML = ""; return; }
   const crumbs = [{ label: "Ana Sayfa", hash: "#/" }];
-  if (route.view === "combo") {
-    const combo = COMBO_PAIRS.find((c) => c.key === route.comboKey);
-    crumbs.push({ label: combo ? combo.label : "Ortak Sayfa", hash: null });
-  }
-  if (route.collector) crumbs.push({ label: route.collector, hash: `${collectorHash(route.collector)}/groups` });
+  if (route.collector) crumbs.push({ label: collectorDisplayLabel(route.collector), hash: `${collectorHash(route.collector)}/groups` });
   if (route.view === "group" || route.view === "country") {
     crumbs.push({ label: `${route.group} Grubu`, hash: `${collectorHash(route.collector)}/grup/${route.group}` });
   }
@@ -482,9 +581,13 @@ function renderHome() {
     </div>`;
   }).join("");
 
-  const comboLinks = COMBO_PAIRS.map((c) =>
-    `<button class="btn-secondary combo-home-link" data-combo="${esc(c.key)}">🤝 ${esc(c.label)} — Ortak Sayfa</button>`
-  ).join("");
+  const comboLinks = COMBO_PAIRS.map((c) => {
+    const stats = computeStats(`combo:${c.key}`);
+    return `<button class="btn-secondary combo-home-link" data-combo="${esc(c.key)}">
+      <span>🤝 ${esc(c.label)} — Ortak Sayfa</span>
+      <span class="combo-home-pct">${pctLabel(stats.pct)}</span>
+    </button>`;
+  }).join("");
 
   return `
     <div class="welcome-text">Hoş Geldiniz! Herkesin albümü burada.</div>
@@ -508,7 +611,7 @@ function attachHomeEvents() {
     });
   });
   document.querySelectorAll("[data-combo]").forEach((b) => {
-    b.addEventListener("click", () => go(`#/combo/${b.dataset.combo}`));
+    b.addEventListener("click", () => go(collectorHash(`combo:${b.dataset.combo}`)));
   });
 }
 
@@ -628,10 +731,11 @@ function panelHeaderHtml(collector, title) {
     const currentSt = getStatus(collector, last.code);
     preview = `<div class="undo-preview">${esc(last.code)}: ${statusLabel(currentSt)} → ${statusLabel(last.prevStatus)}</div>`;
   }
+  const combo = isComboId(collector);
   return `
     <div class="panel-header" style="${color ? `--box-color:${color}` : ""}">
-      <div class="who">${esc(title)}</div>
-      <button class="icon-btn" id="settings-btn" title="Rengi değiştir">⚙️</button>
+      <div class="who">${combo ? "🤝 " : ""}${esc(title)}</div>
+      ${combo ? "" : `<button class="icon-btn" id="settings-btn" title="Rengi değiştir">⚙️</button>`}
     </div>
     <div class="undo-bar">
       <div class="undo-preview-wrap">${preview}</div>
@@ -640,12 +744,17 @@ function panelHeaderHtml(collector, title) {
   `;
 }
 function attachPanelHeaderEvents(collector) {
-  document.getElementById("settings-btn").addEventListener("click", () => go(`${collectorHash(collector)}/renk`));
+  const settingsBtn = document.getElementById("settings-btn");
+  if (settingsBtn) settingsBtn.addEventListener("click", () => go(`${collectorHash(collector)}/renk`));
   const undoBtn = document.getElementById("undo-btn");
   if (undoBtn && !undoBtn.disabled) undoBtn.addEventListener("click", () => undoLast(collector));
 }
 
 // ---------- Kart bileşeni ----------
+function safeIdPart(s) {
+  return String(s).replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
 function stickerCardHtml(collector, code, opts) {
   opts = opts || {};
   const st = getStatus(collector, code);
@@ -655,7 +764,9 @@ function stickerCardHtml(collector, code, opts) {
   const highlight = opts.highlight && opts.highlight.toUpperCase() === code.toUpperCase();
   const icon = meta.group === "FWC" ? "⚽" : meta.flag;
   const statusIcon = st === "owned" ? "✅" : st === "swap" ? "🔁" : "❌";
-  return `<div class="sticker-card status-${st} ${highlight ? "highlight" : ""}" data-code="${esc(code)}" id="card-${esc(code)}" style="${color ? `--box-color:${color}` : ""}">
+  const domId = `card-${safeIdPart(collector)}-${esc(code)}`;
+  return `<div class="sticker-card status-${st} ${highlight ? "highlight" : ""} ${opts.tag ? "combo-card" : ""}" data-code="${esc(code)}" data-collector="${esc(collector)}" id="${domId}" style="${color ? `--box-color:${color}` : ""}" ${opts.tag ? `title="${esc(collector)}"` : ""}>
+    ${opts.tag ? `<div class="combo-tag">${esc(opts.tag)}</div>` : ""}
     <div class="sc-status-badge">${statusIcon}</div>
     <div>${icon}</div>
     <div>${esc(code)}</div>
@@ -664,16 +775,19 @@ function stickerCardHtml(collector, code, opts) {
 }
 
 
-function attachCardEvents(collector) {
+// Kartın kendi üzerindeki data-collector'ı okur, tıklanınca DAİMA doğru gerçek
+// kişinin modalını açar — combo modunda aynı ekranda farklı kartlar farklı gerçek
+// kişilere ait olabileceği için parametre olarak sabit bir collector KULLANILMAZ.
+function attachCardEvents() {
   document.querySelectorAll("#app .sticker-card").forEach((el) => {
-    el.addEventListener("click", () => openCardModal(collector, el.dataset.code));
+    el.addEventListener("click", () => openCardModal(el.dataset.collector, el.dataset.code));
   });
 }
 
-function scrollToHighlight(code) {
+function scrollToHighlight(collector, code) {
   if (!code) return;
   setTimeout(() => {
-    const el = document.getElementById(`card-${code}`);
+    const el = document.getElementById(`card-${safeIdPart(collector)}-${code}`);
     if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
   }, 60);
 }
@@ -707,7 +821,7 @@ function renderGroups(route) {
     </div>`;
 
   return `
-    ${panelHeaderHtml(collector, collector)}
+    ${panelHeaderHtml(collector, collectorDisplayLabel(collector))}
     <div class="groups-summary">12 gruptan ${completeGroups}'ü tamamlandı</div>
     <div class="groups-grid">${boxes}${fwcBox}</div>
   `;
@@ -728,7 +842,7 @@ function renderFwc(route) {
   const stats = codesCompletion(FWC_CODE_LIST, collector);
   const cards = FWC_CODE_LIST.map((code) => stickerCardHtml(collector, code, { highlight })).join("");
   return `
-    ${panelHeaderHtml(collector, collector)}
+    ${panelHeaderHtml(collector, collectorDisplayLabel(collector))}
     <div class="groups-summary">FWC tamamlanma: ${pctLabel(stats.pct)} ${stats.missing === 0 ? "⚽ GOL!" : ""}</div>
     <div class="fwc-grid">${cards}</div>
   `;
@@ -750,7 +864,7 @@ function renderGroupCountries(route) {
   const prevG = prevGroupKey(group);
   const nextG = nextGroupKey(group);
   return `
-    ${panelHeaderHtml(collector, `${group} Grubu`)}
+    ${panelHeaderHtml(collector, isComboId(collector) ? `${collectorDisplayLabel(collector)} — ${group} Grubu` : `${group} Grubu`)}
     <div class="country-nav">
       <button class="nav-arrow" id="prev-group" title="${esc(prevG)} Grubu">‹</button>
       <div class="country-title">${esc(group)} Grubu</div>
@@ -783,7 +897,7 @@ function renderCountryCards(route) {
   const nextG = nextGroupKey(group);
   const cards = codes.map((code) => stickerCardHtml(collector, code, { highlight })).join("");
   return `
-    ${panelHeaderHtml(collector, `${group} Grubu`)}
+    ${panelHeaderHtml(collector, isComboId(collector) ? `${collectorDisplayLabel(collector)} — ${group} Grubu` : `${group} Grubu`)}
     <div class="country-nav">
       <button class="nav-arrow" id="prev-country">‹</button>
       <div class="country-title">${flag} ${esc(name)} <span style="color:var(--green);font-size:0.9rem;">${pctLabel(stats.pct)}</span>${stats.missing === 0 ? " ⚽" : ""}</div>
@@ -801,7 +915,7 @@ function renderCountryCards(route) {
 }
 function attachCountryCardsEvents(route) {
   attachPanelHeaderEvents(route.collector);
-  attachCardEvents(route.collector);
+  attachCardEvents();
   const prev = document.getElementById("prev-code").value;
   const next = document.getElementById("next-code").value;
   if (prev) document.getElementById("prev-country").addEventListener("click", () => go(`${collectorHash(route.collector)}/grup/${route.group}/${prev}`));
@@ -816,16 +930,30 @@ function attachCountryCardsEvents(route) {
 }
 
 // ---------- Ortak: durum bazlı ülke blokları (Missing / Swap Stickers / Trade Maker ortak kullanır) ----------
+// Combo id verilirse, HER üyenin kendi kartlarını ayrı ayrı (kime ait olduğu tag'iyle)
+// listeler — böylece "kimin kartı" hiç belirsiz kalmaz ve düzenleme her zaman doğru
+// gerçek kişiye gider. Normal tek kişilik kullanımda tag her zaman null'dur.
 function collectStatusBlocks(collector, status) {
+  const members = isComboId(collector) ? comboMembersFor(collector) : [{ collector, tag: null }];
   const blocks = [];
   for (const g of GROUP_ORDER) {
     for (const [name, code] of GROUPS[g]) {
-      const codes = COUNTRY_CODES[code].filter((c) => getStatus(collector, c) === status);
-      if (codes.length) blocks.push({ title: `${countryFlag(name)} ${name}`, codes });
+      const items = [];
+      for (const { collector: c, tag } of members) {
+        for (const stickerCode of COUNTRY_CODES[code]) {
+          if (getStatus(c, stickerCode) === status) items.push({ code: stickerCode, collector: c, tag });
+        }
+      }
+      if (items.length) blocks.push({ title: `${countryFlag(name)} ${name}`, items });
     }
   }
-  const fwcCodes = FWC_CODE_LIST.filter((c) => getStatus(collector, c) === status);
-  if (fwcCodes.length) blocks.push({ title: "⚽ FWC", codes: fwcCodes });
+  const fwcItems = [];
+  for (const { collector: c, tag } of members) {
+    for (const stickerCode of FWC_CODE_LIST) {
+      if (getStatus(c, stickerCode) === status) fwcItems.push({ code: stickerCode, collector: c, tag });
+    }
+  }
+  if (fwcItems.length) blocks.push({ title: "⚽ FWC", items: fwcItems });
   return blocks;
 }
 
@@ -834,11 +962,11 @@ function renderMissing(route) {
   const { collector } = route;
   const blocks = collectStatusBlocks(collector, "missing");
   const html = blocks.map((b) => `<div class="missing-country-block">
-      <div class="mc-title">${esc(b.title)} — ${b.codes.length} eksik</div>
-      <div class="cards-grid">${b.codes.map((c) => stickerCardHtml(collector, c)).join("")}</div>
+      <div class="mc-title">${esc(b.title)} — ${b.items.length} eksik</div>
+      <div class="cards-grid">${b.items.map((item) => stickerCardHtml(item.collector, item.code, { tag: item.tag })).join("")}</div>
     </div>`).join("");
   return `
-    ${panelHeaderHtml(collector, collector)}
+    ${panelHeaderHtml(collector, collectorDisplayLabel(collector))}
     ${blocks.length ? html : `<div class="missing-empty-all">🎉 Hiç eksik sticker yok, albüm tam!</div>`}
   `;
 }
@@ -848,97 +976,20 @@ function renderSwapStickers(route) {
   const { collector, highlight } = route;
   const blocks = collectStatusBlocks(collector, "swap");
   const html = blocks.map((b) => `<div class="missing-country-block">
-      <div class="mc-title">${esc(b.title)} — ${b.codes.length} swap'ta</div>
-      <div class="cards-grid">${b.codes.map((c) => stickerCardHtml(collector, c, { highlight })).join("")}</div>
+      <div class="mc-title">${esc(b.title)} — ${b.items.length} swap'ta</div>
+      <div class="cards-grid">${b.items.map((item) => stickerCardHtml(item.collector, item.code, { highlight, tag: item.tag })).join("")}</div>
     </div>`).join("");
   return `
-    ${panelHeaderHtml(collector, collector)}
+    ${panelHeaderHtml(collector, collectorDisplayLabel(collector))}
     ${blocks.length ? html : `<div class="missing-empty-all">Şu an swap'ta işaretlenmiş bir kartın yok.</div>`}
   `;
-}
-
-// ---------- Ortak Sayfa (Combo) — birden fazla kişinin swap/missing'ini tek yerde toplar ----------
-// Şu an tek çift tanımlı: Andaç D & Berker. İleride başka çiftler eklenmek istenirse
-// COMBO_PAIRS sabitine (dosya başında) yeni bir { key, label, members:[{collector,tag}, ...] } girişi eklemek yeterli.
-// Birden fazla kişinin aynı statüdeki kartlarını, kanonik grup sırasıyla, kime ait olduğu
-// bilgisiyle (tag) birlikte tek bir blok listesinde toplar.
-function collectComboBlocks(members, status) {
-  const blocks = [];
-  for (const g of GROUP_ORDER) {
-    for (const [name, code] of GROUPS[g]) {
-      const items = [];
-      for (const { collector, tag } of members) {
-        for (const stickerCode of COUNTRY_CODES[code]) {
-          if (getStatus(collector, stickerCode) === status) items.push({ code: stickerCode, collector, tag });
-        }
-      }
-      if (items.length) blocks.push({ title: `${countryFlag(name)} ${name}`, items });
-    }
-  }
-  const fwcItems = [];
-  for (const { collector, tag } of members) {
-    for (const stickerCode of FWC_CODE_LIST) {
-      if (getStatus(collector, stickerCode) === status) fwcItems.push({ code: stickerCode, collector, tag });
-    }
-  }
-  if (fwcItems.length) blocks.push({ title: "⚽ FWC", items: fwcItems });
-  return blocks;
-}
-
-// Combo sayfasındaki kart: kime ait olduğunu (A)/(B) etiketiyle gösterir, tıklanınca
-// doğru kişinin kendi verisini değiştiren aynı modalı açar (yanlış kişiye yazma riski yok).
-function comboCardHtml(item) {
-  const { code, collector, tag } = item;
-  const st = getStatus(collector, code);
-  const meta = STICKER_INDEX[code];
-  const icon = meta.group === "FWC" ? "⚽" : meta.flag;
-  const swapN = st === "swap" ? (getSwapCount(collector, code) || 1) : 0;
-  const statusIcon = st === "owned" ? "✅" : st === "swap" ? "🔁" : "❌";
-  return `<div class="sticker-card status-${st} combo-card" data-code="${esc(code)}" data-collector="${esc(collector)}" title="${esc(collector)}">
-    <div class="combo-tag">${esc(tag)}</div>
-    <div class="sc-status-badge">${statusIcon}</div>
-    <div>${icon}</div>
-    <div>${esc(code)}</div>
-    ${st === "swap" ? `<div class="swap-tag">Swap (${swapN})</div>` : ""}
-  </div>`;
-}
-
-function renderComboBlocks(blocks, emptyMsg) {
-  if (!blocks.length) return `<div class="swap-empty-msg">${esc(emptyMsg)}</div>`;
-  return blocks.map((b) => `<div class="missing-country-block">
-      <div class="mc-title">${esc(b.title)}</div>
-      <div class="cards-grid">${b.items.map(comboCardHtml).join("")}</div>
-    </div>`).join("");
-}
-
-function renderComboPage(comboKey) {
-  const combo = COMBO_PAIRS.find((c) => c.key === comboKey);
-  if (!combo) return `<div class="center-msg">Ortak sayfa bulunamadı.</div>`;
-  const swapBlocks = collectComboBlocks(combo.members, "swap");
-  const missingBlocks = collectComboBlocks(combo.members, "missing");
-  const legend = combo.members.map((m) => `<span class="combo-legend-item"><b>${esc(m.tag)}</b> = ${esc(m.collector)}</span>`).join(" · ");
-  return `
-    <div class="panel-header">
-      <div class="who">🤝 ${esc(combo.label)}</div>
-    </div>
-    <div class="combo-legend">${legend}</div>
-    <div class="trade-section-title">🔁 Swaps (İkisi Birlikte)</div>
-    ${renderComboBlocks(swapBlocks, "İkisinde de şu an swap'ta işaretli kart yok.")}
-    <div class="trade-section-title">📋 Missing (İkisi Birlikte)</div>
-    ${renderComboBlocks(missingBlocks, "İkisinin de eksiği yok, tebrikler!")}
-  `;
-}
-
-function attachComboEvents() {
-  document.querySelectorAll(".combo-card").forEach((el) => {
-    el.addEventListener("click", () => openCardModal(el.dataset.collector, el.dataset.code));
-  });
 }
 
 // ---------- Swap Finder sekmesi ----------
 function renderSwapFinder(route) {
   const { collector } = route;
-  const others = COLLECTORS.filter((c) => c !== collector);
+  const exclude = isComboId(collector) ? [collector, ...comboMembersFor(collector).map((m) => m.collector)] : [collector];
+  const others = COLLECTORS.filter((c) => !exclude.includes(c));
   if (!swapFinderTarget || !others.includes(swapFinderTarget)) swapFinderTarget = others[0];
 
   const selectBtns = others.map((c) =>
@@ -947,15 +998,16 @@ function renderSwapFinder(route) {
 
   const mine = buildSwapList(collector, swapFinderTarget);
   const theirs = buildSwapList(swapFinderTarget, collector);
+  const mineClickable = !isComboId(collector); // combo'da merge edilmiş bir swap kartının kime ait olduğu belirsizdir, bilgi amaçlı kalır
 
   const emptyMsg = `<div class="swap-empty-msg">Bu ikilide takas fırsatı yok, ikiniz de birbirine denk gelmiyorsunuz ⚽</div>`;
 
   return `
-    ${panelHeaderHtml(collector, collector)}
+    ${panelHeaderHtml(collector, collectorDisplayLabel(collector))}
     <div class="swap-finder-select">${selectBtns}</div>
     <div class="swap-pair-block">
       <div class="sp-title mine">Sen → ${esc(swapFinderTarget)}</div>
-      <div class="swap-opp-list">${mine.length ? mine.map((o) => swapOppRow(o, true)).join("") : ""}</div>
+      <div class="swap-opp-list">${mine.length ? mine.map((o) => swapOppRow(o, mineClickable)).join("") : ""}</div>
       ${mine.length === 0 ? emptyMsg : ""}
     </div>
     <div class="swap-pair-block">
@@ -992,9 +1044,11 @@ function attachSwapFinderEvents(route) {
   document.querySelectorAll("[data-target]").forEach((b) => {
     b.addEventListener("click", () => { swapFinderTarget = b.dataset.target; render(); });
   });
-  document.querySelectorAll(".swap-opp-row [data-code]").forEach((b) => {
-    b.addEventListener("click", () => openCardModal(route.collector, b.dataset.code));
-  });
+  if (!isComboId(route.collector)) {
+    document.querySelectorAll(".swap-opp-row [data-code]").forEach((b) => {
+      b.addEventListener("click", () => openCardModal(route.collector, b.dataset.code));
+    });
+  }
 }
 
 // ---------- Trade Maker sekmesi ----------
@@ -1007,15 +1061,33 @@ function getTradeState(collector) {
 function resetTradeState(collector) {
   tradeStates[collector] = { stage: "intro", activeList: null, confirmArmed: false, showHistory: false, selectedSwap: new Set(), selectedMissing: new Set() };
 }
-function toggleInSet(set, code) {
-  if (set.has(code)) set.delete(code); else set.add(code);
+function toggleInSet(set, key) {
+  if (set.has(key)) set.delete(key); else set.add(key);
+}
+
+// Sepet anahtarı "gerçekKişi::kod" biçimindedir. Normal (tek kişilik) kullanımda bu
+// sadece kendi adın+kod olur; combo modunda aynı kodun Andaç D'ye ve Berker'e ait iki
+// AYRI girişini birbirinden ayırt etmeyi sağlar (bir Set'te bare "MEX2" tek başına yeterli olmazdı).
+function cartKey(collector, code) { return `${collector}::${code}`; }
+function parseCartKey(key) {
+  const idx = key.indexOf("::");
+  return { collector: key.slice(0, idx), code: key.slice(idx + 2) };
+}
+// Combo panelinde bir gerçek kişinin (A)/(B) etiketini bulur; normal kullanımda null.
+function tagForRealCollector(panelCollector, realCollector) {
+  if (!isComboId(panelCollector)) return null;
+  const m = comboMembersFor(panelCollector).find((x) => x.collector === realCollector);
+  return m ? m.tag : null;
 }
 
 // Trade Maker'daki kartlar: tek tıkla direkt sepete ekler/çıkarır, modal AÇMAZ.
-function cartCardHtml(code, selected) {
+function cartCardHtml(item, selected) {
+  const { code, collector, tag } = item;
   const meta = STICKER_INDEX[code];
   const icon = meta.group === "FWC" ? "⚽" : meta.flag;
-  return `<div class="sticker-card cart-card ${selected ? "cart-selected" : ""}" data-code="${esc(code)}">
+  const key = cartKey(collector, code);
+  return `<div class="sticker-card cart-card ${selected ? "cart-selected" : ""} ${tag ? "combo-card" : ""}" data-key="${esc(key)}" ${tag ? `title="${esc(collector)}"` : ""}>
+    ${tag ? `<div class="combo-tag">${esc(tag)}</div>` : ""}
     <div>${icon}</div>
     <div>${esc(code)}</div>
     ${selected ? '<div class="cart-check">✓ Sepette</div>' : ""}
@@ -1026,7 +1098,7 @@ function renderCartBlocks(blocks, selectedSet, emptyMsg) {
   if (!blocks.length) return `<div class="swap-empty-msg">${esc(emptyMsg)}</div>`;
   return blocks.map((b) => `<div class="missing-country-block">
       <div class="mc-title">${esc(b.title)}</div>
-      <div class="cards-grid">${b.codes.map((c) => cartCardHtml(c, selectedSet.has(c))).join("")}</div>
+      <div class="cards-grid">${b.items.map((item) => cartCardHtml(item, selectedSet.has(cartKey(item.collector, item.code)))).join("")}</div>
     </div>`).join("");
 }
 
@@ -1042,14 +1114,16 @@ function containerLabelForKey(key) {
   return key === "FWC" ? "⚽ FWC" : STICKER_INDEX[COUNTRY_CODES[key][0]].countryName;
 }
 
-// Bir trade onaylandığında gerçek durum değişikliklerini uygular:
+// Bir trade onaylandığında gerçek durum değişikliklerini uygular — HER ZAMAN sepet
+// anahtarındaki gerçek kişiye yazar (panel combo olsa bile asla "combo:..." kimliğine yazmaz):
 // - Verilen swap kartı: swap sayısı 1 azalır; 0'a düşerse kart "owned"a döner (elindeki tek kopyan kalır)
 // - Alınan missing kartı: doğrudan "owned" olur
-// Ayrıca: (a) toplu geri alma için değişiklik kaydı tutar, (b) trade sonucu tamamlanan ülke/grup/FWC var mı tespit eder.
+// Ayrıca: (a) her gerçek kişi için ayrı toplu-geri-alma kaydı tutar, (b) trade sonucu
+// tamamlanan ülke/grup/FWC var mı (panelin kendi — combo ise birleşik — tamamlanma durumuna göre) tespit eder.
 function confirmTrade(collector, state) {
-  const affected = [...state.selectedSwap, ...state.selectedMissing];
+  const affectedCodes = [...state.selectedSwap, ...state.selectedMissing].map((k) => parseCartKey(k).code);
   const containersBefore = new Map(); // key -> { codes, wasComplete }
-  for (const code of affected) {
+  for (const code of affectedCodes) {
     const key = containerKeyForCode(code);
     if (!containersBefore.has(key)) {
       const codes = containerCodesForCode(code);
@@ -1057,45 +1131,61 @@ function confirmTrade(collector, state) {
     }
   }
 
-  const log = [];
-  const appliedGiven = [];
-  const appliedReceived = [];
-  for (const code of state.selectedSwap) {
-    if (getStatus(collector, code) !== "swap") continue; // arada başka yerden değişmiş olabilir, dokunma
-    const prevStatus = getStatus(collector, code);
-    const prevSwap = getSwapCount(collector, code);
+  const logsByReal = {}; // gerçekKişi -> [{code, prevStatus, prevSwap}]
+  const givenByReal = {}; // gerçekKişi -> [kod, ...]
+  const receivedByReal = {}; // gerçekKişi -> [kod, ...]
+  let totalChanged = 0;
+
+  for (const key of state.selectedSwap) {
+    const { collector: real, code } = parseCartKey(key);
+    if (getStatus(real, code) !== "swap") continue; // arada başka yerden değişmiş olabilir, dokunma
+    const prevStatus = getStatus(real, code);
+    const prevSwap = getSwapCount(real, code);
     const newCount = (prevSwap || 1) - 1;
-    if (newCount > 0) setStatus(collector, code, "swap", newCount, { silentRender: true, silentToast: true });
-    else setStatus(collector, code, "owned", null, { silentRender: true, silentToast: true });
-    log.push({ code, prevStatus, prevSwap });
-    appliedGiven.push(code);
+    if (newCount > 0) setStatus(real, code, "swap", newCount, { silentRender: true, silentToast: true });
+    else setStatus(real, code, "owned", null, { silentRender: true, silentToast: true });
+    (logsByReal[real] = logsByReal[real] || []).push({ code, prevStatus, prevSwap });
+    (givenByReal[real] = givenByReal[real] || []).push(code);
+    totalChanged++;
   }
-  for (const code of state.selectedMissing) {
-    if (getStatus(collector, code) !== "missing") continue; // arada başka yerden değişmiş olabilir, dokunma
-    const prevStatus = getStatus(collector, code);
-    const prevSwap = getSwapCount(collector, code);
-    setStatus(collector, code, "owned", null, { silentRender: true, silentToast: true });
-    log.push({ code, prevStatus, prevSwap });
-    appliedReceived.push(code);
+  for (const key of state.selectedMissing) {
+    const { collector: real, code } = parseCartKey(key);
+    if (getStatus(real, code) !== "missing") continue; // arada başka yerden değişmiş olabilir, dokunma
+    const prevStatus = getStatus(real, code);
+    const prevSwap = getSwapCount(real, code);
+    setStatus(real, code, "owned", null, { silentRender: true, silentToast: true });
+    (logsByReal[real] = logsByReal[real] || []).push({ code, prevStatus, prevSwap });
+    (receivedByReal[real] = receivedByReal[real] || []).push(code);
+    totalChanged++;
   }
-  lastTradeLog[collector] = log.length ? log : null;
+
+  // "Son Trade'i Geri Al" — panelin kendi kimliğinde (combo id veya gerçek isim) saklanır;
+  // her girişte gerçek sahibi de taşınır ki geri alma her zaman doğru kişiye yazsın.
+  const combinedLog = [];
+  for (const real in logsByReal) {
+    for (const entry of logsByReal[real]) combinedLog.push({ ...entry, collector: real });
+  }
+  lastTradeLog[collector] = combinedLog.length ? combinedLog : null;
 
   const newlyCompleted = [];
   for (const [key, info] of containersBefore) {
     if (!info.wasComplete && codesCompletion(info.codes, collector).missing === 0) newlyCompleted.push(key);
   }
-  return { changed: log.length, newlyCompleted, given: appliedGiven, received: appliedReceived };
+  return { changed: totalChanged, newlyCompleted, givenByReal, receivedByReal };
 }
 
 // Son onaylanan trade'i tek seferde geri alır (undo stack'in 3 sınırından bağımsız).
+// Her giriş kendi gerçek sahibine yazar (combo'dan yapılan bir trade iki farklı
+// gerçek kişiyi etkilemiş olabilir).
 function undoLastTrade(collector) {
   const log = lastTradeLog[collector];
   if (!log || !log.length) return;
   for (const entry of log) {
-    applyLocal(collector, entry.code, entry.prevStatus, entry.prevSwap);
+    const real = entry.collector || collector; // eski kayıtlarla geriye dönük uyumluluk
+    applyLocal(real, entry.code, entry.prevStatus, entry.prevSwap);
     const updates = {};
-    updates[`/stickers/${collector}/${entry.code}`] = entry.prevStatus;
-    updates[`/swapCounts/${collector}/${entry.code}`] = entry.prevStatus === "swap" ? (entry.prevSwap || 1) : null;
+    updates[`/stickers/${real}/${entry.code}`] = entry.prevStatus;
+    updates[`/swapCounts/${real}/${entry.code}`] = entry.prevStatus === "swap" ? (entry.prevSwap || 1) : null;
     db.ref().update(updates).catch(() => showToast("Bağlantı sorunu, tekrar deneyin", true));
   }
   lastTradeLog[collector] = null;
@@ -1103,10 +1193,16 @@ function undoLastTrade(collector) {
   render();
 }
 
-// Bir kişinin en son N takasını (yeniden eskiye) döndürür.
+// Bir kişinin (combo ise İKİ kişinin birleşik) en son N takasını (yeniden eskiye) döndürür.
 function getTradeHistoryList(collector, limit) {
-  const raw = cache.tradeHistory[collector] || {};
-  const entries = Object.values(raw);
+  const members = isComboId(collector)
+    ? comboMembersFor(collector).map((m) => ({ real: m.collector, tag: m.tag }))
+    : [{ real: collector, tag: null }];
+  const entries = [];
+  for (const { real, tag } of members) {
+    const raw = cache.tradeHistory[real] || {};
+    for (const k in raw) entries.push({ ...raw[k], _owner: real, _tag: tag });
+  }
   entries.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
   return entries.slice(0, limit);
 }
@@ -1122,8 +1218,9 @@ function formatTradeTimestamp(ts) {
 function renderTradeHistoryEntry(entry) {
   const given = (entry.given && entry.given.length) ? entry.given.join(", ") : "—";
   const received = (entry.received && entry.received.length) ? entry.received.join(", ") : "—";
+  const ownerTag = entry._tag ? `<span class="combo-tag" style="position:static;display:inline-block;margin-right:6px;">${esc(entry._tag)}</span>${esc(entry._owner)} — ` : "";
   return `<div class="trade-history-entry">
-    <div class="the-date">${esc(formatTradeTimestamp(entry.timestamp))}</div>
+    <div class="the-date">${ownerTag}${esc(formatTradeTimestamp(entry.timestamp))}</div>
     <div class="the-row"><span class="the-label out">📤 Verildi:</span> ${esc(given)}</div>
     <div class="the-row"><span class="the-label in">📥 Alındı:</span> ${esc(received)}</div>
   </div>`;
@@ -1132,12 +1229,13 @@ function renderTradeHistoryEntry(entry) {
 function renderTradeMaker(route) {
   const { collector } = route;
   const state = getTradeState(collector);
+  const label = collectorDisplayLabel(collector);
 
   if (state.stage === "intro") {
     if (state.showHistory) {
       const history = getTradeHistoryList(collector, 5);
       return `
-        ${panelHeaderHtml(collector, collector)}
+        ${panelHeaderHtml(collector, label)}
         <div class="trade-history">
           <div class="trade-section-title">📜 Son 5 Takas</div>
           ${history.length ? history.map(renderTradeHistoryEntry).join("") : '<div class="swap-empty-msg">Henüz takas geçmişin yok.</div>'}
@@ -1149,7 +1247,7 @@ function renderTradeMaker(route) {
     }
     const hasLastTrade = lastTradeLog[collector] && lastTradeLog[collector].length > 0;
     return `
-      ${panelHeaderHtml(collector, collector)}
+      ${panelHeaderHtml(collector, label)}
       <div class="trade-intro">
         <div class="welcome-text">Bir arkadaşınla takas yapmadan önce burada teklifini hazırla:<br>vereceğin swap kartlarını ve almak istediğin eksik kartları seç.</div>
         <button class="btn-primary" id="trade-start">+ Create a Trade</button>
@@ -1169,7 +1267,7 @@ function renderTradeMaker(route) {
       ? renderCartBlocks(missingBlocks, state.selectedMissing, "Eksik kartın yok, tebrikler!")
       : `<div class="swap-empty-msg">Yukarıdan bir kategori seç, kartlar burada açılsın.</div>`;
     return `
-      ${panelHeaderHtml(collector, collector)}
+      ${panelHeaderHtml(collector, label)}
       <div class="trade-toggle-row">
         <button class="trade-toggle-box ${state.activeList === "swap" ? "active" : ""}" data-list="swap">
           <div class="ttb-title">🔁 Swaps</div>
@@ -1192,15 +1290,15 @@ function renderTradeMaker(route) {
   }
 
   // stage === "summary"
-  const swapList = [...state.selectedSwap];
-  const missingList = [...state.selectedMissing];
+  const swapItems = [...state.selectedSwap].map((k) => { const { collector: c, code } = parseCartKey(k); return { code, collector: c, tag: tagForRealCollector(collector, c) }; });
+  const missingItems = [...state.selectedMissing].map((k) => { const { collector: c, code } = parseCartKey(k); return { code, collector: c, tag: tagForRealCollector(collector, c) }; });
   return `
-    ${panelHeaderHtml(collector, collector)}
+    ${panelHeaderHtml(collector, label)}
     <div class="trade-summary">
       <div class="trade-section-title">📤 Vereceklerin (Swap) <span class="trade-hint">— çıkarmak için karta tıkla</span></div>
-      <div class="cards-grid" id="trade-summary-swap">${swapList.length ? swapList.map((c) => cartCardHtml(c, true)).join("") : '<div class="swap-empty-msg">Seçim yok</div>'}</div>
+      <div class="cards-grid" id="trade-summary-swap">${swapItems.length ? swapItems.map((item) => cartCardHtml(item, true)).join("") : '<div class="swap-empty-msg">Seçim yok</div>'}</div>
       <div class="trade-section-title">📥 Alacakların (Missing) <span class="trade-hint">— çıkarmak için karta tıkla</span></div>
-      <div class="cards-grid" id="trade-summary-missing">${missingList.length ? missingList.map((c) => cartCardHtml(c, true)).join("") : '<div class="swap-empty-msg">Seçim yok</div>'}</div>
+      <div class="cards-grid" id="trade-summary-missing">${missingItems.length ? missingItems.map((item) => cartCardHtml(item, true)).join("") : '<div class="swap-empty-msg">Seçim yok</div>'}</div>
 
       ${state.confirmArmed ? `
         <div class="trade-confirm-warning">Emin misin? Bu işlem kartların durumunu gerçekten değiştirir.</div>
@@ -1211,7 +1309,7 @@ function renderTradeMaker(route) {
       ` : `
         <div class="modal-actions" style="margin-top:20px;">
           <button class="btn-secondary" id="trade-edit">✏️ Düzenle</button>
-          <button class="btn-primary" id="trade-confirm" ${(swapList.length + missingList.length) === 0 ? "disabled" : ""}>✅ Confirm Trade</button>
+          <button class="btn-primary" id="trade-confirm" ${(swapItems.length + missingItems.length) === 0 ? "disabled" : ""}>✅ Confirm Trade</button>
         </div>
       `}
       <div style="text-align:center;margin-top:12px;">
@@ -1260,12 +1358,15 @@ function attachTradeMakerEvents(route) {
   const confirmYesBtn = document.getElementById("trade-confirm-yes");
   if (confirmYesBtn) confirmYesBtn.addEventListener("click", () => {
     const result = confirmTrade(collector, state);
-    if (result.changed > 0) {
-      // Takas geçmişi kaydı — sadece görüntüleme amaçlı, /stickers'a hiç dokunmaz.
-      db.ref(`/tradeHistory/${collector}`).push({
+    // Takas geçmişi — sadece görüntüleme amaçlı, /stickers'a hiç dokunmaz.
+    // Combo'dan yapılan bir trade iki farklı gerçek kişiyi etkilemiş olabilir;
+    // her biri KENDİ geçmişine kaydedilir (kendi panelinden yapmış gibi).
+    const realsInvolved = new Set([...Object.keys(result.givenByReal), ...Object.keys(result.receivedByReal)]);
+    for (const real of realsInvolved) {
+      db.ref(`/tradeHistory/${real}`).push({
         timestamp: Date.now(),
-        given: result.given,
-        received: result.received,
+        given: result.givenByReal[real] || [],
+        received: result.receivedByReal[real] || [],
       }).catch(() => {}); // geçmiş kaydı kritik değil, sessizce yut
     }
     fireConfetti();
@@ -1293,7 +1394,7 @@ function attachTradeMakerEvents(route) {
       : null;
     if (targetSet) {
       activeListWrap.querySelectorAll(".cart-card").forEach((el) => {
-        el.addEventListener("click", () => { toggleInSet(targetSet, el.dataset.code); render(); });
+        el.addEventListener("click", () => { toggleInSet(targetSet, el.dataset.key); render(); });
       });
     }
   }
@@ -1301,16 +1402,27 @@ function attachTradeMakerEvents(route) {
   // Özet ekranında bir karta tıklamak onu sepetten çıkarır (tekli çıkarma).
   const summarySwapWrap = document.getElementById("trade-summary-swap");
   if (summarySwapWrap) summarySwapWrap.querySelectorAll(".cart-card").forEach((el) => {
-    el.addEventListener("click", () => { state.selectedSwap.delete(el.dataset.code); render(); });
+    el.addEventListener("click", () => { state.selectedSwap.delete(el.dataset.key); render(); });
   });
   const summaryMissingWrap = document.getElementById("trade-summary-missing");
   if (summaryMissingWrap) summaryMissingWrap.querySelectorAll(".cart-card").forEach((el) => {
-    el.addEventListener("click", () => { state.selectedMissing.delete(el.dataset.code); render(); });
+    el.addEventListener("click", () => { state.selectedMissing.delete(el.dataset.key); render(); });
   });
 }
 
 
 // ---------- Genel arama (+ otomatik öneri) ----------
+// Arama kutusunun hemen altında, aramanın hangi panel bağlamında yapılacağını gösterir
+// (özellikle Ortak Sayfa'dayken hangi kişinin/combo'nun aranacağı belirsiz olabilirdi).
+function updateSearchContextHint() {
+  const hint = document.getElementById("search-context-hint");
+  if (!hint) return;
+  if (!activeCollector) { hint.innerHTML = ""; return; }
+  const label = collectorDisplayLabel(activeCollector);
+  const icon = isComboId(activeCollector) ? "🤝" : "👤";
+  hint.innerHTML = `${icon} <b>${esc(label)}</b> panelinde aranıyor`;
+}
+
 function goToStickerCode(rawCode) {
   const code = rawCode.toUpperCase();
   const meta = STICKER_INDEX[code];
